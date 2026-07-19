@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "slmn"
+dynamic = ["version"]
+description = "Scott's Language Model Nest: sundry utils + MCP "
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [{name = "Scott H. Hawley", email = "scott@scotthawley.com"}]
+keywords = ['nbdev']
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/drscotthawley/slmn"
+Documentation = "https://drscotthawley.github.io/slmn/"
+
+[project.entry-points.nbdev]
+slmn = "slmn._modidx:d"
+
+[tool.setuptools.dynamic]
+version = {attr = "slmn.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["slmn"]
+
+[tool.nbdev]
