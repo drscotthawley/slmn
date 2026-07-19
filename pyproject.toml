@@ -15,11 +15,18 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
 ]
-dependencies = []
+dependencies = ["nbformat", "pymupdf", "fastcore", "httpx"]
+
+[project.optional-dependencies]
+mcp = ["fastmcp"]
 
 [project.urls]
 Repository = "https://github.com/drscotthawley/slmn"
 Documentation = "https://drscotthawley.github.io/slmn/"
+
+[project.scripts]
+slmn = "slmn.cli:main"
+slmn-mcp = "slmn.mcp:main"
 
 [project.entry-points.nbdev]
 slmn = "slmn._modidx:d"
