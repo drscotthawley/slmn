@@ -42,4 +42,7 @@ version = {attr = "slmn.__version__"}
 [tool.setuptools.packages.find]
 include = ["slmn"]
 
+[tool.setuptools.package-data]
+slmn = ["scripts/*.sh"]
+
 [tool.nbdev]

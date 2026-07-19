@@ -13,14 +13,16 @@ try:
 except ImportError as e:
     raise ImportError(
         "The MCP server needs the 'mcp' extra: pip install slmn[mcp] (or 'uv pip install slmn[mcp]'). "
-        "It's optional -- slmn.nbtools/slmn.misc and the `slmn` CLI work without it."
+        "It's optional -- slmn.nbtools/slmn.misc/slmn.remote and the `slmn` CLI work without it."
     ) from e
 from .nbtools import read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells
-from .misc import read_pdf, check_ci, gpu_free, fetch_url
+from .misc import read_pdf, gpu_free
+from .remote import remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci
 
 # %% ../nbs/03_mcp.ipynb #ce6a9a7e
 mcp = FastMCP("slmn")
-for _fn in (read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, read_pdf, check_ci, gpu_free, fetch_url):
+for _fn in (read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, read_pdf, gpu_free,
+            remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci):
     mcp.add_tool(_fn)
 
 # %% ../nbs/03_mcp.ipynb #080f6962

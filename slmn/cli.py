@@ -11,7 +11,8 @@ __all__ = ['TOOLS', 'main']
 import sys, inspect
 from fastcore.script import anno_parser
 from .nbtools import read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells
-from .misc import read_pdf, check_ci, gpu_free, fetch_url
+from .misc import read_pdf, gpu_free
+from .remote import remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci
 
 # %% ../nbs/00_cli.ipynb #7e517b66
 TOOLS = {
@@ -21,9 +22,13 @@ TOOLS = {
     'patch_nb_cell': patch_nb_cell,
     'insert_cells': insert_cells,
     'read_pdf': read_pdf,
-    'check_ci': check_ci,
     'gpu_free': gpu_free,
+    'remote_launch': remote_launch,
+    'remote_status': remote_status,
+    'remote_smoke_test': remote_smoke_test,
+    'remote_gpu_free': remote_gpu_free,
     'fetch_url': fetch_url,
+    'check_ci': check_ci,
 }
 
 # %% ../nbs/00_cli.ipynb #56c85754

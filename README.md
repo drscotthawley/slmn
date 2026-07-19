@@ -50,10 +50,41 @@ Documentation can be found hosted on this GitHub [repository](https://github.com
 
 ## How to use
 
-Fill me in please! Don’t forget code examples:
+Install (lite by default – just the tools, no MCP server or its dependencies):
+
+``` sh
+pip install -e .
+```
+
+Want the optional MCP server too? Install the `mcp` extra (pulls in `fastmcp` and friends):
+
+``` sh
+pip install -e ".[mcp]"
+```
+
+Import tools directly:
 
 ``` python
-1+1
+from slmn.nbtools import grep_nb
+print(grep_nb('nbs/01_nbtools.ipynb', 'def read_nb'))
+```
+
+Or from the shell:
+
+``` sh
+slmn grep_nb nbs/01_nbtools.ipynb 'def read_nb'
+slmn gpu_free
+```
+
+Or (with the `mcp` extra installed) register the MCP server with any MCP-speaking client:
+
+``` sh
+claude mcp add slmn -- slmn-mcp
+```
+
+``` python
+from slmn.misc import gpu_free
+gpu_free()
 ```
 
     2
