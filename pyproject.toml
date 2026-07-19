@@ -19,6 +19,11 @@ dependencies = ["nbformat", "pymupdf", "fastcore", "httpx"]
 
 [project.optional-dependencies]
 mcp = ["fastmcp"]
+# The reusable CI workflow (answerdotai/workflows/nbdev3-ci) hardcodes `pip install -e ".[dev]"` --
+# not configurable via inputs -- so `dev` needs to cover everything the test suite touches,
+# including the MCP notebook. Mirrors `mcp` for now; can grow independently later if CI needs
+# something `mcp` installs don't (e.g. test-only tooling).
+dev = ["fastmcp"]
 
 [project.urls]
 Repository = "https://github.com/drscotthawley/slmn"
