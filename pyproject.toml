@@ -44,6 +44,6 @@ version = {attr = "slmn.__version__"}
 include = ["slmn"]
 
 [tool.setuptools.package-data]
-slmn = ["scripts/*.sh"]
+slmn = ["scripts/*.sh", "skills/*/*.md"]
 
 [tool.nbdev]

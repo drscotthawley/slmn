@@ -203,7 +203,7 @@ def write_nb_docs(path:str, # path to the .ipynb file
 
 # %% ../nbs/01_nbtools.ipynb #792a24f2
 def write_project_docs(specs:dict, # {notebook_path: {'notes': [[after_id, source], ...], 'patches': [[cell_id, new_source], ...]}} -- one entry per notebook to touch; either key may be omitted or None
-                        llms_txt:dict=None # optional {path: source} of extra plain-text files to write verbatim, e.g. {'nbs/llms.txt': '# proj\n> ...'} -- see the llms.txt section below
+                        llms_txt:dict=None # optional {path: source} of extra plain-text files to write verbatim, e.g. {'nbs/llms.txt': '# proj\n> ...'}
                         ) -> str:
     """Document a whole nbdev project in one call: apply a write_nb_docs batch to each notebook
     named in `specs`, plus optionally write extra plain-text files (llms_txt). Validates every
@@ -212,46 +212,10 @@ def write_project_docs(specs:dict, # {notebook_path: {'notes': [[after_id, sourc
 
     This is the level to reach for when repeating slmn's own documentation pass (section-Note
     headings per notebook + a tidied index/README) on another nbdev project, e.g. boopiter.
-
-    --- The llms.txt recipe (read this before using `llms_txt` for real) ---
-
-    llms.txt (https://llmstxt.org) is a project-summary file for LLMs, analogous to
-    robots.txt. Getting it live on an nbdev project's GitHub Pages site is NOT just "write the
-    file" -- three build-config edits are needed too, and they're NOT notebook cells, so
-    write_project_docs does not attempt them; do them by hand (or with plain file edits) once
-    per project, then use `llms_txt` here just to (re)write nbs/llms.txt's content itself:
-
-    1. pyproject.toml: add `pysym2md` and `llms-txt` (the pip package; ships the `llms_txt2ctx`
-       command) to the `dev` extra -- NOT a new extra of their own. Both of nbdev's reusable
-       GitHub Actions (nbdev3-ci for tests, quarto-ghp3 for the Pages deploy) hardcode
-       `pip install -e ".[dev]"`, so anything the docs *build* needs must live in `dev`.
-
-    2. nbs/_quarto.yml, under `project:`:
-         pre-render:
-           - pysym2md --output_file apilist.txt <pkg>      # <pkg> = the import name
-         post-render:
-           - llms_txt2ctx llms.txt --optional true --save_nbdev_fname llms-ctx-full.txt
-           - llms_txt2ctx llms.txt --save_nbdev_fname llms-ctx.txt
-         resources:
-           - "*.txt"
-
-    3. .gitignore: add `nbs/apilist.txt` and `nbs/llms-ctx*.txt` (regenerated every build; the
-       `llms-ctx*.txt` actually land in nbdev's `_proc/` dir, which is normally already
-       ignored -- add the nbs/ patterns anyway since apilist.txt lands next to llms.txt).
-
-    4. nbs/llms.txt itself: H1 title, `>` blockquote summary, a detail paragraph or two, then
-       `##`-headed link sections (`[name](url): description`) pointing at the site's published
-       `*.html.md` doc pages, and an `## Optional` section linking `apilist.txt` (its content
-       is included only when a context-builder asks for the fuller `llms-ctx-full.txt`).
-
-    Gotchas learned building this for slmn (2026-07-20): `llms_txt2ctx` DOWNLOADS every linked
-    URL and inlines it -- so links must point at the already-published site, not local files.
-    On the very first deploy after wiring this up, `apilist.txt` isn't live yet, so that one
-    build's `llms-ctx-full.txt` embeds GitHub's 404 page for the Optional-section link; it
-    self-heals on the next deploy once apilist.txt exists. `llms-ctx.txt` (no --optional) is
-    unaffected since it doesn't reference apilist.txt. `pysym2md <pkg>` pulls every symbol's
-    signature and docstring straight from the installed package -- another reason to keep
-    docstrings real (see write_nb_docs's own docstring for the matching per-notebook rule).
+    For the full recipe -- including when to use `notes` (additive, default) vs `patches`
+    (only for disposable nbdev/quarto boilerplate, never over real human-written content) and
+    how to wire up an llms.txt file for the project's docs site -- see the write-project-docs
+    skill: slmn/skills/write-project-docs/SKILL.md.
     """
     resolved = {}
     for path, spec in specs.items():
