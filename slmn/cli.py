@@ -11,7 +11,7 @@ __all__ = ['TOOLS', 'main']
 import sys, inspect
 from fastcore.script import anno_parser
 from .nbtools import read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, add_nb_cell
-from .misc import read_pdf, gpu_free
+from .misc import read_pdf, gpu_free, install_skills
 from .remote import remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci
 from .publish import publish
 
@@ -25,6 +25,7 @@ TOOLS = {
     'add_nb_cell': add_nb_cell,
     'read_pdf': read_pdf,
     'gpu_free': gpu_free,
+    'install_skills': install_skills,
     'remote_launch': remote_launch,
     'remote_status': remote_status,
     'remote_smoke_test': remote_smoke_test,

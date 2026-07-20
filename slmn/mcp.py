@@ -16,13 +16,13 @@ except ImportError as e:
         "It's optional -- slmn.nbtools/slmn.misc/slmn.remote and the `slmn` CLI work without it."
     ) from e
 from .nbtools import read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, add_nb_cell, write_nb_docs, write_project_docs
-from .misc import read_pdf, gpu_free
+from .misc import read_pdf, gpu_free, install_skills
 from .remote import remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci
 from .publish import publish
 
 # %% ../nbs/03_mcp.ipynb #ce6a9a7e
 mcp = FastMCP("slmn")
-for _fn in (read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, add_nb_cell, write_nb_docs, write_project_docs, read_pdf, gpu_free,
+for _fn in (read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, add_nb_cell, write_nb_docs, write_project_docs, read_pdf, gpu_free, install_skills,
             remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci, publish):
     mcp.add_tool(_fn)
 
