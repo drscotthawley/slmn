@@ -8,7 +8,7 @@ Docs: https://drscotthawley.github.io/slmn/publish.html.md"""
 __all__ = ['publish']
 
 # %% ../nbs/06_publish.ipynb #9679b72f
-import subprocess, sys, time
+import os, subprocess, sys, time
 from pathlib import Path
 
 # %% ../nbs/06_publish.ipynb #b870f5c9
@@ -20,11 +20,6 @@ def _git_out(args:list, cwd:str=None) -> str:
     "Stripped stdout of a `git` command, or '' if it failed -- for the small read-only queries (branch, HEAD sha, status)."
     r = _run(['git', *args], cwd=cwd)
     return r.stdout.strip() if r.returncode == 0 else ''
-
-def _exe(name:str) -> str:
-    "Resolve a console script (nbdev-clean/nbdev-export) next to the running interpreter if it's there, else fall back to bare PATH lookup -- so publish uses the same venv's nbdev as the project it's publishing, not whatever happens to be first on PATH."
-    p = Path(sys.executable).parent / name
-    return str(p) if p.exists() else name
 
 # %% ../nbs/06_publish.ipynb #eead6968
 def _confirm(status:str, yes:bool) -> bool:
@@ -43,39 +38,47 @@ def _confirm(status:str, yes:bool) -> bool:
 def _wait_for_ci(sha:str, # the pushed commit whose CI run to wait on
                  branch:str, # the branch it was pushed to (used to locate the run)
                  cwd:str=None, # repo directory
-                 appear_tries:int=30, # how many times to poll for the run to register before giving up
-                 appear_delay:float=2.0 # seconds between those polls
+                 timeout:int=120, # max seconds to wait for the run to REGISTER after a push (GitHub can be slow to queue it, esp. a branch's first run). Once found, we then wait as long as the run itself takes.
+                 poll:float=2.0 # seconds between registration checks
                  ) -> 'bool|None':
-    "Block until the GitHub Actions run triggered by `sha` finishes, via the `gh` CLI. Returns True (passed), False (failed), or None (gh unavailable, or no run ever registered for this commit). A run often doesn't appear the instant a push returns, so first poll `gh run list` for one whose headSha matches, then `gh run watch --exit-status` (which streams live progress and exits nonzero iff the run concluded in failure)."
+    "Block until the GitHub Actions run for `sha` finishes, via `gh`. Returns True (passed), False (failed), or None if it couldn't be determined -- and prints WHY: gh not installed, gh not authenticated (run `gh auth login` / set GH_TOKEN), or no run registered within `timeout`. A push doesn't register a run instantly, so first poll `gh run list` (up to `timeout`) for one whose headSha matches, then `gh run watch --exit-status` (streams live, exits nonzero iff the run failed). Auth/tooling errors short-circuit immediately rather than burning the whole timeout."
     if _run(['gh', '--version'], cwd=cwd).returncode != 0:
         print('gh CLI not found -- skipping CI wait.', file=sys.stderr); return None
-    rid = None
-    for _ in range(appear_tries):
+    deadline = time.time() + timeout
+    while True:
         r = _run(['gh', 'run', 'list', '--branch', branch, '--limit', '20',
                   '--json', 'databaseId,headSha', '--jq',
                   f'[.[]|select(.headSha=="{sha}")][0].databaseId'], cwd=cwd)
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or '').strip()
+            if 'auth' in err.lower() or 'gh_token' in err.lower():
+                print('gh is not authenticated -- run `gh auth login` (or set GH_TOKEN). Skipping CI wait.', file=sys.stderr)
+            else:
+                print(f'gh run list failed -- skipping CI wait:\n{err}', file=sys.stderr)
+            return None
         rid = r.stdout.strip()
         if rid and rid != 'null': break
-        rid = None
-        time.sleep(appear_delay)
-    if not rid:
-        print(f'No CI run found for {sha[:8]} after ~{int(appear_tries*appear_delay)}s -- skipping CI wait.',
-              file=sys.stderr)
-        return None
+        if time.time() >= deadline:
+            print(f'No CI run registered for {sha[:8]} within {timeout}s -- skipping CI wait.', file=sys.stderr)
+            return None
+        time.sleep(poll)
     print(f'Watching CI run {rid} ...')
     return _run(['gh', 'run', 'watch', rid, '--exit-status'], cwd=cwd, capture=False).returncode == 0
 
 # %% ../nbs/06_publish.ipynb #833a1390
 def publish(msg:str=None, # commit message; required only if there are changes to commit (prompted for on an interactive TTY if omitted). Ignored when the branch is already committed and just being shipped.
+            prebuild:list=None, # shell commands to run before committing (regenerate build artifacts, run local checks, ...). Defaults to nbdev's ['nbdev-clean', 'nbdev-export']; pass [] to skip, or e.g. ['ruff check .', 'pytest -q'] for a non-nbdev project. This venv's bin/ is prepended to PATH so bare tool names resolve to the project's own venv.
             dests:list=None, # publish destinations; only 'github' is implemented so far (pypi/conda later). Defaults to ['github'].
             merge:bool=True, # when on a non-main branch and CI passes, open a PR to main and merge it
             wait_ci:bool=True, # after pushing, wait for GitHub Actions to finish (forced on when a merge is needed -- a merge can't be gated without it)
+            ci_timeout:int=120, # seconds to wait for the CI run to REGISTER after pushing before giving up (see _wait_for_ci); the run itself is then waited on for as long as it takes
             merge_method:str='merge', # how gh merges the PR: 'merge' | 'squash' | 'rebase'
             yes:bool=False, # skip the proceed prompt (the -y override); on a non-TTY without it, publish stops after showing git status so the caller can review and re-invoke
             cwd:str=None # repo directory (default: current directory)
             ) -> str:
-    "Automate the edit->ship loop for an nbdev project. In order: nbdev-clean, nbdev-export, show `git status` and gate on it (see _confirm -- interactive prompt, or read-and-authorize for an agent), git add -u, commit (skipped if nothing is staged), push; then for a 'github' dest wait for CI (see _wait_for_ci), and if it passes while you're on a non-main branch with merge=True, open a PR to main and merge it (merge_method), then leave you on an updated local main. Stops at the first failing step and returns a summary. Only tracked files are staged (git add -u) -- new/untracked files show in the status review but aren't auto-added. If nothing is staged but the branch already has commits to ship, the commit step is skipped and it still pushes/CIs/merges."
+    "Automate the edit->ship loop. In order: run `prebuild` (default nbdev-clean + nbdev-export), show `git status` and gate on it (see _confirm -- interactive prompt, or read-and-authorize for an agent), git add -u, commit (skipped if nothing staged), push; then for a 'github' dest wait for CI (see _wait_for_ci), and if it passes while you're on a non-main branch with merge=True, open a PR to main and merge it (merge_method), then leave you on an updated local main. Everything runs blocking/stop-on-error (don't proceed if a step failed) -- run publish itself in the background if you don't want to wait on CI. Only tracked files are staged (git add -u); new/untracked files show in the status review but aren't auto-added. If nothing is staged but the branch already has commits to ship, the commit step is skipped and it still pushes/CIs/merges. Knows nothing about nbdev specifically -- that's just the default prebuild."
     dests = dests if dests is not None else ['github']
+    prebuild = prebuild if prebuild is not None else ['nbdev-clean', 'nbdev-export']
     if merge_method not in ('merge', 'squash', 'rebase'):
         return f"merge_method must be 'merge'|'squash'|'rebase', got {merge_method!r}."
     if 'github' not in dests:
@@ -84,18 +87,20 @@ def publish(msg:str=None, # commit message; required only if there are changes t
     log = []
     def say(m): print(m); log.append(m)
 
-    # 1-2. regenerate .py from the notebooks, using this venv's nbdev (see _exe)
-    for name in ('nbdev-clean', 'nbdev-export'):
-        r = _run([_exe(name)], cwd=cwd)
+    # 1. prebuild: run each command in a shell, with this venv's bin/ ahead of PATH so a bare
+    # `nbdev-clean` (etc.) resolves to the project's own venv rather than whatever's first globally.
+    env = {**os.environ, 'PATH': f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    for cmd in prebuild:
+        r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, env=env)
         if r.returncode != 0:
-            return f"{name} failed (rc={r.returncode}):\n{r.stderr or r.stdout}"
-        say(f"[ok] {name}")
+            return f"prebuild step failed: {cmd!r} (rc={r.returncode}):\n{r.stderr or r.stdout}"
+        say(f"[ok] {cmd}")
 
-    # 3-4. show status and gate on it (may run clean/export twice across a non-TTY review re-run -- both idempotent)
+    # 2. show status and gate on it (may run prebuild twice across a non-TTY review re-run -- clean/export are idempotent)
     if not _confirm(_git_out(['status', '--short', '--branch'], cwd=cwd), yes):
         return "Stopped before committing (awaiting confirmation)."
 
-    # 5. stage tracked changes only; commit iff something is actually staged
+    # 3. stage tracked changes only; commit iff something is actually staged
     if _run(['git', 'add', '-u'], cwd=cwd).returncode != 0:
         return "git add -u failed."
     if _run(['git', 'diff', '--cached', '--quiet'], cwd=cwd).returncode != 0:  # something staged
@@ -112,17 +117,17 @@ def publish(msg:str=None, # commit message; required only if there are changes t
     branch = _git_out(['rev-parse', '--abbrev-ref', 'HEAD'], cwd=cwd)
     sha = _git_out(['rev-parse', 'HEAD'], cwd=cwd)
 
-    # 7. push (-u origin HEAD works whether or not the branch already has an upstream)
+    # 4. push (-u origin HEAD works whether or not the branch already has an upstream)
     r = _run(['git', 'push', '-u', 'origin', 'HEAD'], cwd=cwd)
     if r.returncode != 0:
         return "\n".join(log) + f"\ngit push failed:\n{r.stderr or r.stdout}"
     say(f"[ok] pushed origin/{branch} ({sha[:8]})")
 
-    # 8-9. CI
+    # 5. CI
     on_main = branch in ('main', 'master')
     if not (wait_ci or (merge and not on_main)):
         return "\n".join(log) + "\nDone (CI wait skipped)."
-    ci = _wait_for_ci(sha, branch, cwd=cwd)
+    ci = _wait_for_ci(sha, branch, cwd=cwd, timeout=ci_timeout)
     if ci is False:
         return "\n".join(log) + "\n[FAIL] CI failed -- stopping. Run `slmn check_ci` for the failure logs."
     if ci is None:
@@ -130,7 +135,7 @@ def publish(msg:str=None, # commit message; required only if there are changes t
         return "\n".join(log) + f"\n[??] CI status unknown -- stopping.{note}"
     say("[ok] CI passed")
 
-    # 10. non-main + merge -> PR to main and merge it
+    # 6. non-main + merge -> PR to main and merge it
     if on_main or not merge:
         return "\n".join(log) + "\nDone."
     title = (msg or _git_out(['log', '-1', '--pretty=%s'], cwd=cwd)).splitlines()[0]
