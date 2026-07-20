@@ -18,11 +18,12 @@ except ImportError as e:
 from .nbtools import read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, add_nb_cell
 from .misc import read_pdf, gpu_free
 from .remote import remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci
+from .publish import publish
 
 # %% ../nbs/03_mcp.ipynb #ce6a9a7e
 mcp = FastMCP("slmn")
 for _fn in (read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, add_nb_cell, read_pdf, gpu_free,
-            remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci):
+            remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci, publish):
     mcp.add_tool(_fn)
 
 # %% ../nbs/03_mcp.ipynb #080f6962
