@@ -93,7 +93,7 @@ def edit_nb(path:str, # path to the .ipynb file
             raise ValueError(f"old_string not found in cell {cell_id}")
         src, old_str = src_stripped, old_stripped
     cell['source'] = src.replace(old_str, new_str, 1)
-    json.dump(nb, open(path, 'w'), indent=1)
+    json.dump(nb, open(path, 'w'), indent=1, ensure_ascii=False)
     return f"OK: updated cell {cell_id} in {path}"
 
 # %% ../nbs/01_nbtools.ipynb #355ef52b
@@ -108,7 +108,7 @@ def patch_nb_cell(path:str, # path to the .ipynb file
     if cell is None:
         raise ValueError(f"cell {cell_id} not found in {path}")
     cell['source'] = new_source
-    json.dump(nb, open(path, 'w'), indent=1)
+    json.dump(nb, open(path, 'w'), indent=1, ensure_ascii=False)
     return f"OK: patched cell {cell_id} in {path}"
 
 # %% ../nbs/01_nbtools.ipynb #4894c534
