@@ -4,7 +4,7 @@ project:
 website:
   title: "slmn"
   site-url: "https://drscotthawley.github.io/slmn"
-  description: "Scott's Language Model Nest: sundry utils + MCP "
+  description: "Slammin' Language Model Nest: sundry utils + MCP "
   repo-branch: main
   repo-url: "https://github.com/drscotthawley/slmn"
 

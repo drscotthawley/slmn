@@ -10,8 +10,14 @@ project:
 
 format:
   html:
-    theme: cosmo
+    theme:
+      dark: [cosmo, darktheme.scss]
+      light: cosmo
+    highlight-style:
+      light: arrow
+      dark: dracula
     css: styles.css
+    include-after-body: theme-toggle.html
     toc: true
     keep-md: true
   commonmark: default
@@ -21,7 +27,7 @@ website:
   open-graph: true
   repo-actions: [issue]
   navbar:
-    background: primary
+    background: dark
     search: true
   sidebar:
     style: floating
