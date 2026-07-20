@@ -1,0 +1,19 @@
+# slmn
+
+> Slammin' Language Model Nest -- a personal toolkit of LLM-workflow tools (notebook editing, PDF reading, CI checks, GPU checks, remote jobs, file-based IPC, and release automation), usable three ways: import the functions directly, drive them from the `slmn` CLI, or expose them over an optional MCP server.
+
+Every tool is a plain, type-hinted function -- that single definition is what the CLI turns into command-line flags and what the MCP server turns into a tool schema, so the three ways to call a tool never drift apart. slmn is built with nbdev: the notebooks under `nbs/` are the source of truth, and the `slmn/` package is generated from them.
+
+## Docs
+
+- [nbtools](https://drscotthawley.github.io/slmn/nbtools.html.md): read, grep, and edit Jupyter notebook cells by id (including `write_nb_docs`, the batch doc-writer)
+- [remote](https://drscotthawley.github.io/slmn/remote.html.md): launch and monitor background jobs on a remote host over ssh; fetch a URL; check a repo's GitHub CI
+- [dead_drop](https://drscotthawley.github.io/slmn/dead_drop.html.md): file-based async IPC -- drop a message file, pick it up elsewhere (with a streaming variant)
+- [publish](https://drscotthawley.github.io/slmn/publish.html.md): automate the nbdev edit->ship loop (clean/export, reviewed commit, push, wait for CI, merge a PR to main)
+- [misc](https://drscotthawley.github.io/slmn/misc.html.md): read a PDF's text; check whether a local GPU is free
+- [cli](https://drscotthawley.github.io/slmn/cli.html.md): the `slmn <tool> [args...]` dispatcher that exposes every tool from the shell
+- [mcp](https://drscotthawley.github.io/slmn/mcp.html.md): an optional server exposing the same tools to any MCP client (`slmn-mcp`)
+
+## Optional
+
+- [API list](https://drscotthawley.github.io/slmn/apilist.txt): full symbol + docstring listing for the whole package
