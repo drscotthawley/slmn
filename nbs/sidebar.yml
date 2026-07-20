@@ -2,4 +2,10 @@ website:
   sidebar:
     contents:
       - index.ipynb
-      - 00_core.ipynb
+      - 00_cli.ipynb
+      - 01_nbtools.ipynb
+      - 02_remote.ipynb
+      - 03_mcp.ipynb
+      - 04_misc.ipynb
+      - 05_dead_drop.ipynb
+      - 06_publish.ipynb

@@ -1,0 +1,17 @@
+/*-- scss:defaults --*/
+// Dark palette ported from boopiter's docs -- DaisyUI v5 "dark" tokens, converted from
+// oklch() to hex (Sass color math can't operate on oklch()). Same colors, applied here as
+// slmn's docs dark theme. Layered on cosmo as the `dark` half of a light/dark theme pair.
+$body-bg:    #1d232a;  // base-100        -- page background
+$body-color: #ecf9ff;  // base-content    -- foreground text
+$primary:    #605dff;  // primary         -- links / active accents (kept as the accent)
+$dark:       #191e24;  // base-200        -- navbar + the few chrome bits that echo it
+$code-color: #bd93f9;  // dracula purple  -- inline `backtick` code; the default is a dark
+                       //                    purple that reads too dim on the dark page
+$code-block-bg: #282a36; // dracula bg    -- fenced code blocks. With a light/dark theme pair,
+                       //                    Quarto's per-mode highlight CSS carries only token
+                       //                    colors (dark = dracula); the block background comes
+                       //                    from the theme. Give dark blocks dracula's own bg so
+                       //                    the bright tokens aren't stranded on cosmo's light one.
+
+/*-- scss:rules --*/
