@@ -16,7 +16,14 @@ import httpx
 
 # %% ../nbs/02_remote.ipynb #dfc81a0e
 import slmn as _slmn_pkg
-_SCRIPTS_DIR = Path(_slmn_pkg.__file__).parent / 'scripts'  # ships inside the slmn package -- see pyproject.toml package-data
+# scripts ship alongside this module (pyproject.toml package-data). Anchor on this file's own
+# location -- always the real path the submodule was loaded from, correct regardless of cwd.
+# (importlib.resources.files('slmn') is unreliable here: a bare slmn repo dir on sys.path
+# shadows the install as a namespace package, so it resolves to the wrong root.) __file__ is
+# undefined when this cell runs in a live notebook kernel -- fall back to the package there.
+try: _here = Path(__file__).parent
+except NameError: _here = Path(_slmn_pkg.__file__).parent
+_SCRIPTS_DIR = _here / 'scripts'
 _SSH = ['ssh', '-o', 'ClearAllForwardings=yes']
 
 # %% ../nbs/02_remote.ipynb #062628fe
