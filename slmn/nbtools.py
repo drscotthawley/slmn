@@ -114,27 +114,42 @@ def patch_nb_cell(path:str, # path to the .ipynb file
 # %% ../nbs/01_nbtools.ipynb #4894c534
 def insert_cells(path:str, # path to the .ipynb file
                   anchor_id:str, # exact cell id to insert after
-                  sources:list[str] # one or more new cells' source, inserted in order right after the anchor
+                  sources:list[str], # one or more new cells' source, inserted in order right after the anchor -- plain source, no '#| ...' directives (see add_nb_cell)
+                  export:bool=True, # forwarded to add_nb_cell for every inserted cell -- see there
+                  eval:bool=True # forwarded to add_nb_cell for every inserted cell -- see there
                   ) -> str:
-    "Insert one or more new code cells immediately after the cell with id `anchor_id`. A thin bulk convenience wrapper over add_nb_cell (the single-cell primitive), so the actual nbformat plumbing lives in one place. Raises ValueError if the anchor isn't found."
+    "Insert one or more new code cells immediately after the cell with id `anchor_id`. A thin bulk convenience wrapper over add_nb_cell (the single-cell primitive), so the actual nbformat plumbing -- including the '#| export'/'#| eval: false' directive handling -- lives in one place. Raises ValueError if the anchor isn't found."
     last = anchor_id
     for s in sources:
-        last = add_nb_cell(path, s, cell_type='code', after_id=last)
+        last = add_nb_cell(path, s, cell_type='code', after_id=last, export=export, eval=eval)
     return f"OK: inserted {len(sources)} cell(s) after {anchor_id} in {path}"
 
 # %% ../nbs/01_nbtools.ipynb #57f27381
+_LEADING_DIRECTIVE_RE = re.compile(r'^\s*#\|.*\n?')
+
+def _strip_leading_directives(source:str) -> str:
+    "Remove any leading '#| ...' nbdev/quarto directive lines from `source` (e.g. a stray '#| export' a caller included literally), so add_nb_cell can (re)apply export/eval consistently from its own `export`/`eval` params instead of trusting whatever the caller typed."
+    while _LEADING_DIRECTIVE_RE.match(source):
+        source = _LEADING_DIRECTIVE_RE.sub('', source, count=1)
+    return source
+
 def add_nb_cell(path:str, # path to the .ipynb file
-                source:str, # the new cell's source text (include any nbdev directives, e.g. a leading '#| export', literally)
+                source:str, # the new cell's source text -- any leading '#| ...' directive lines are stripped and regenerated from `export`/`eval` below, so don't include them yourself
                 cell_type:str='code', # nbformat cell type: 'code', 'markdown', or 'raw'
                 after_id:str=None, # id of the cell to insert immediately after; None appends at the end (in cell order, NOT a raw file append)
-                cell_id:str=None # if given, force the new cell's id (e.g. to match an intended nbdev '# %%' marker); default lets nbformat assign one
+                cell_id:str=None, # if given, force the new cell's id (e.g. to match an intended nbdev '# %%' marker); default lets nbformat assign one
+                export:bool=True, # code cells only: prepend '#| export' so nbdev exports this cell into the module. Ignored for markdown/raw cells.
+                eval:bool=True # code cells only: if False, prepend '#| eval: false' so nbdev skips executing this cell during tests/docs (e.g. a live-server/network demo). Ignored for markdown/raw cells.
                 ) -> str:
-    "Add a new cell to a Jupyter notebook and return its id. Appends to the end by default, or inserts right after `after_id`. `cell_type` is an nbformat type ('code'/'markdown'/'raw') -- note that boopiter-style note/prompt/assistant cells are all 'markdown' at the nbformat level. Reads/writes the file as plain JSON (indent=1) like the other nbtools here, so a one-cell add stays a one-cell git diff rather than reserializing the whole notebook. Raises ValueError on an unknown `cell_type`, or an `after_id` that isn't present."
+    "Add a new cell to a Jupyter notebook and return its id. Appends to the end by default, or inserts right after `after_id`. `cell_type` is an nbformat type ('code'/'markdown'/'raw') -- note that boopiter-style note/prompt/assistant cells are all 'markdown' at the nbformat level. This tool -- not the caller -- owns the '#| export'/'#| eval: false' directive text for code cells: pass plain source and use `export`/`eval` instead of typing the directives yourself (any you do include get stripped and regenerated, so this stays idempotent either way). Reads/writes the file as plain JSON (indent=1) like the other nbtools here, so a one-cell add stays a one-cell git diff rather than reserializing the whole notebook. Raises ValueError on an unknown `cell_type`, or an `after_id` that isn't present."
     path = _resolve_safe(path)
     nb = json.load(open(path))
     makers = {'code': _nbf.v4.new_code_cell, 'markdown': _nbf.v4.new_markdown_cell, 'raw': _nbf.v4.new_raw_cell}
     if cell_type not in makers:
         raise ValueError(f"cell_type must be one of {sorted(makers)}, got {cell_type!r}")
+    if cell_type == 'code':
+        directives = [d for d, on in (('#| export', export), ('#| eval: false', not eval)) if on]
+        source = '\n'.join(directives + [_strip_leading_directives(source)])
     cell = dict(makers[cell_type](source))  # nbformat builds a schema-valid cell (id/metadata/etc.); keep it as a plain dict
     if cell_id is not None: cell['id'] = cell_id
     cells = nb['cells']
@@ -147,4 +162,3 @@ def add_nb_cell(path:str, # path to the .ipynb file
         cells.insert(idx + 1, cell)
     json.dump(nb, open(path, 'w'), indent=1, ensure_ascii=False)
     return cell['id']
-
