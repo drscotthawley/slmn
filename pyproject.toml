@@ -19,11 +19,12 @@ dependencies = ["nbformat", "pymupdf", "fastcore", "httpx"]
 
 [project.optional-dependencies]
 mcp = ["fastmcp"]
-# The reusable CI workflow (answerdotai/workflows/nbdev3-ci) hardcodes `pip install -e ".[dev]"` --
-# not configurable via inputs -- so `dev` needs to cover everything the test suite touches,
-# including the MCP notebook. Mirrors `mcp` for now; can grow independently later if CI needs
-# something `mcp` installs don't (e.g. test-only tooling).
-dev = ["fastmcp"]
+# Both reusable workflows hardcode `pip install -e ".[dev]"` (not configurable via inputs):
+# nbdev3-ci for tests and quarto-ghp3 for the docs deploy. So `dev` must cover everything the
+# test suite touches (the MCP notebook -> fastmcp) AND everything the docs build touches: the
+# _quarto.yml pre/post-render hooks that generate llms.txt (pysym2md -> apilist.txt,
+# llms-txt -> llms-ctx*.txt). Grows independently of `mcp` as those needs diverge.
+dev = ["fastmcp", "pysym2md", "llms-txt"]
 
 [project.urls]
 Repository = "https://github.com/drscotthawley/slmn"
