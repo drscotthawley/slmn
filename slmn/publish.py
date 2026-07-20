@@ -76,7 +76,7 @@ def publish(msg:str=None, # commit message; required only if there are changes t
             yes:bool=False, # skip the proceed prompt (the -y override); on a non-TTY without it, publish stops after showing git status so the caller can review and re-invoke
             cwd:str=None # repo directory (default: current directory)
             ) -> str:
-    "Automate the edit->ship loop. In order: run `prebuild` (default nbdev-clean + nbdev-export), show `git status` and gate on it (see _confirm -- interactive prompt, or read-and-authorize for an agent), git add -u, commit (skipped if nothing staged), push; then for a 'github' dest wait for CI (see _wait_for_ci), and if it passes while you're on a non-main branch with merge=True, open a PR to main and merge it (merge_method), then leave you on an updated local main. Everything runs blocking/stop-on-error (don't proceed if a step failed) -- run publish itself in the background if you don't want to wait on CI. Only tracked files are staged (git add -u); new/untracked files show in the status review but aren't auto-added. If nothing is staged but the branch already has commits to ship, the commit step is skipped and it still pushes/CIs/merges. Knows nothing about nbdev specifically -- that's just the default prebuild."
+    "Automate the edit->ship loop. In order: run `prebuild` (default nbdev-clean + nbdev-export), show `git status` and gate on it (see _confirm -- interactive prompt, or read-and-authorize for an agent), git add -u, commit (skipped if nothing staged), push; then for a 'github' dest wait for CI (see _wait_for_ci), and if it passes while you're on a non-main branch with merge=True, open a PR to main and merge it (merge_method), then leave you on an updated local main. Everything runs blocking/stop-on-error (don't proceed if a step failed) -- run publish itself in the background if you don't want to wait on CI. Progress is printed live; the returned string is a short final outcome. Only tracked files are staged (git add -u); new/untracked files show in the status review but aren't auto-added. If nothing is staged but the branch already has commits to ship, the commit step is skipped and it still pushes/CIs/merges. Knows nothing about nbdev specifically -- that's just the default prebuild."
     dests = dests if dests is not None else ['github']
     prebuild = prebuild if prebuild is not None else ['nbdev-clean', 'nbdev-export']
     if merge_method not in ('merge', 'squash', 'rebase'):
@@ -84,8 +84,7 @@ def publish(msg:str=None, # commit message; required only if there are changes t
     if 'github' not in dests:
         return f"Nothing to do -- only 'github' is implemented so far, got dests={dests}."
 
-    log = []
-    def say(m): print(m); log.append(m)
+    def say(m): print(m, flush=True)  # live progress; the return value is just the final outcome (no re-dump of the log)
 
     # 1. prebuild: run each command in a shell, with this venv's bin/ ahead of PATH so a bare
     # `nbdev-clean` (etc.) resolves to the project's own venv rather than whatever's first globally.
@@ -120,38 +119,37 @@ def publish(msg:str=None, # commit message; required only if there are changes t
     # 4. push (-u origin HEAD works whether or not the branch already has an upstream)
     r = _run(['git', 'push', '-u', 'origin', 'HEAD'], cwd=cwd)
     if r.returncode != 0:
-        return "\n".join(log) + f"\ngit push failed:\n{r.stderr or r.stdout}"
+        return f"git push failed:\n{r.stderr or r.stdout}"
     say(f"[ok] pushed origin/{branch} ({sha[:8]})")
 
     # 5. CI
     on_main = branch in ('main', 'master')
     if not (wait_ci or (merge and not on_main)):
-        return "\n".join(log) + "\nDone (CI wait skipped)."
+        return "Done (CI wait skipped)."
     ci = _wait_for_ci(sha, branch, cwd=cwd, timeout=ci_timeout)
     if ci is False:
-        return "\n".join(log) + "\n[FAIL] CI failed -- stopping. Run `slmn check_ci` for the failure logs."
+        return "[FAIL] CI failed -- stopping. Run `slmn check_ci` for the failure logs."
     if ci is None:
-        note = "  (a PR merge needs a confirmed CI pass, so not merging)" if (merge and not on_main) else ""
-        return "\n".join(log) + f"\n[??] CI status unknown -- stopping.{note}"
+        note = " (a PR merge needs a confirmed CI pass, so not merging)" if (merge and not on_main) else ""
+        return f"[??] CI status unknown -- stopping.{note}"
     say("[ok] CI passed")
 
     # 6. non-main + merge -> PR to main and merge it
     if on_main or not merge:
-        return "\n".join(log) + "\nDone."
+        return "Done."
     title = (msg or _git_out(['log', '-1', '--pretty=%s'], cwd=cwd)).splitlines()[0]
     body = msg or _git_out(['log', '-1', '--pretty=%B'], cwd=cwd)
     cr = _run(['gh', 'pr', 'create', '--base', 'main', '--head', branch, '--title', title, '--body', body], cwd=cwd)
     out = cr.stderr + cr.stdout
     if cr.returncode != 0:
         if 'No commits between' in out:
-            return "\n".join(log) + "\nNothing to ship: branch has no commits beyond main."
+            return "Nothing to ship: branch has no commits beyond main."
         if 'already exists' not in out:
-            return "\n".join(log) + f"\ngh pr create failed:\n{out}"
+            return f"gh pr create failed:\n{out}"
     mr = _run(['gh', 'pr', 'merge', branch, f'--{merge_method}', '--delete-branch'], cwd=cwd)
     if mr.returncode != 0:
-        return "\n".join(log) + f"\ngh pr merge failed:\n{mr.stderr or mr.stdout}"
+        return f"gh pr merge failed:\n{mr.stderr or mr.stdout}"
     say(f"[ok] merged {branch} -> main ({merge_method}), branch deleted")
     _run(['git', 'checkout', 'main'], cwd=cwd)
     _run(['git', 'pull'], cwd=cwd)
-    say("[ok] local now on updated main")
-    return "\n".join(log) + "\nDone."
+    return f"Done -- {branch} merged to main; local now on updated main."
