@@ -21,6 +21,16 @@ def _git_out(args:list, cwd:str=None) -> str:
     r = _run(['git', *args], cwd=cwd)
     return r.stdout.strip() if r.returncode == 0 else ''
 
+def _venv_bin(venv:str=None, cwd:str=None) -> Path:
+    "The bin/ directory to put ahead of PATH when running a project's prebuild commands. `sys.executable`'s venv is the right answer only when slmn is being run *from* the project it's building -- an MCP server stays in one venv for the life of the process, so a bare `nbdev-export` would resolve into the server's venv and fail to import the target project (and naming a binary by absolute path doesn't help when it shells out to another one, as nbdev-readme does to pysym2md: that inner lookup goes through PATH). Resolution order: an explicit `venv` (its bin/, or the path itself if it already is a bin/), else a `.venv`/`venv` inside the repo, else ~/envs/<repo-dir-name>, else -- for a project with no venv of its own -- the running interpreter's, which is the old behavior."
+    if venv:
+        p = Path(venv).expanduser()
+        return p/'bin' if (p/'bin').is_dir() else p
+    root = Path(cwd).expanduser().resolve() if cwd else Path.cwd()
+    for c in (root/'.venv', root/'venv', Path.home()/'envs'/root.name):
+        if (c/'bin').is_dir(): return c/'bin'
+    return Path(sys.executable).parent
+
 # %% ../nbs/06_publish.ipynb #eead6968
 def _confirm(status:str, yes:bool) -> bool:
     "The proceed gate, shown after nbdev-clean/export so the review reflects generated changes too. Prints `status` (git status --short, so untracked files show as '??' and can't be silently missed by the later `git add -u`), then decides: `yes=True` proceeds outright (the -y override); on an interactive TTY it prompts 'Okay to proceed? [Y/n]'; on a non-TTY (a background run, an MCP/agent call) it returns False WITHOUT prompting -- the caller is meant to read the printed status and, if it looks right, re-invoke with yes=True. That single gate is thus both a human confirmation and an agent's read-and-authorize handoff."
@@ -67,7 +77,8 @@ def _wait_for_ci(sha:str, # the pushed commit whose CI run to wait on
 
 # %% ../nbs/06_publish.ipynb #833a1390
 def publish(msg:str=None, # commit message; required only if there are changes to commit (prompted for on an interactive TTY if omitted). Ignored when the branch is already committed and just being shipped.
-            prebuild:list=None, # shell commands to run before committing (regenerate build artifacts, run local checks, ...). Defaults to nbdev's ['nbdev-clean', 'nbdev-export', 'nbdev-readme'] (the last regenerates README.md from nbs/index.ipynb -- without it, index edits never reach the README); pass [] to skip, or e.g. ['ruff check .', 'pytest -q'] for a non-nbdev project. This venv's bin/ is prepended to PATH so bare tool names resolve to the project's own venv.
+            prebuild:list=None, # shell commands to run before committing (regenerate build artifacts, run local checks, ...). Defaults to nbdev's ['nbdev-clean', 'nbdev-export', 'nbdev-readme'] (the last regenerates README.md from nbs/index.ipynb -- without it, index edits never reach the README); pass [] to skip, or e.g. ['ruff check .', 'pytest -q'] for a non-nbdev project. Run with the project venv's bin/ ahead of PATH, so bare tool names resolve there -- see `venv`.
+            venv:str=None, # the venv whose bin/ goes ahead of PATH for the prebuild commands, and thus for anything they shell out to. Defaults to auto-detection from the repo (see _venv_bin): .venv/venv inside it, else ~/envs/<repo-dir-name>, else the interpreter running slmn. Worth setting explicitly when publishing *another* project from a long-lived process -- an MCP server is stuck in whichever venv it launched from, which is almost never the venv of the repo being published.
             dests:list=None, # publish destinations; only 'github' is implemented so far (pypi/conda later). Defaults to ['github'].
             merge:bool=True, # when on a non-main branch and CI passes, open a PR to main and merge it
             wait_ci:bool=True, # after pushing, wait for GitHub Actions to finish (forced on when a merge is needed -- a merge can't be gated without it)
@@ -76,7 +87,7 @@ def publish(msg:str=None, # commit message; required only if there are changes t
             yes:bool=False, # skip the proceed prompt (the -y override); on a non-TTY without it, publish stops after showing git status so the caller can review and re-invoke
             cwd:str=None # repo directory (default: current directory)
             ) -> str:
-    "Automate the edit->ship loop. In order: run `prebuild` (default nbdev-clean + nbdev-export + nbdev-readme), show `git status` and gate on it (see _confirm -- interactive prompt, or read-and-authorize for an agent), git add -u, commit (skipped if nothing staged), push; then for a 'github' dest wait for CI (see _wait_for_ci), and if it passes while you're on a non-main branch with merge=True, open a PR to main and merge it (merge_method), then leave you on an updated local main. Everything runs blocking/stop-on-error (don't proceed if a step failed) -- run publish itself in the background if you don't want to wait on CI. Progress is printed live; the returned string is a short final outcome. Only tracked files are staged (git add -u); new/untracked files show in the status review but aren't auto-added. If nothing is staged but the branch already has commits to ship, the commit step is skipped and it still pushes/CIs/merges. Knows nothing about nbdev specifically -- that's just the default prebuild."
+    "Automate the edit->ship loop. In order: run `prebuild` (default nbdev-clean + nbdev-export + nbdev-readme, under the project's own venv -- see `venv`), show `git status` and gate on it (see _confirm -- interactive prompt, or read-and-authorize for an agent), git add -u, commit (skipped if nothing staged), push; then for a 'github' dest wait for CI (see _wait_for_ci), and if it passes while you're on a non-main branch with merge=True, open a PR to main and merge it (merge_method), then leave you on an updated local main. Everything runs blocking/stop-on-error (don't proceed if a step failed) -- run publish itself in the background if you don't want to wait on CI. Progress is printed live; the returned string is a short final outcome. Only tracked files are staged (git add -u); new/untracked files show in the status review but aren't auto-added. If nothing is staged but the branch already has commits to ship, the commit step is skipped and it still pushes/CIs/merges. Knows nothing about nbdev specifically -- that's just the default prebuild."
     dests = dests if dests is not None else ['github']
     prebuild = prebuild if prebuild is not None else ['nbdev-clean', 'nbdev-export', 'nbdev-readme']
     if merge_method not in ('merge', 'squash', 'rebase'):
@@ -86,13 +97,18 @@ def publish(msg:str=None, # commit message; required only if there are changes t
 
     def say(m): print(m, flush=True)  # live progress; the return value is just the final outcome (no re-dump of the log)
 
-    # 1. prebuild: run each command in a shell, with this venv's bin/ ahead of PATH so a bare
-    # `nbdev-clean` (etc.) resolves to the project's own venv rather than whatever's first globally.
-    env = {**os.environ, 'PATH': f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+    # 1. prebuild: run each command in a shell, with the *target project's* venv bin/ ahead of PATH,
+    # so a bare `nbdev-clean` (and anything it shells out to in turn) resolves to that project's
+    # venv rather than to whichever one this process happens to be running in.
+    bindir = _venv_bin(venv, cwd)
+    env = {**os.environ, 'PATH': f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
+    if (bindir.parent/'pyvenv.cfg').is_file():
+        env['VIRTUAL_ENV'] = str(bindir.parent)  # match what activation does; some tools read it rather than re-deriving from PATH
+    if prebuild: say(f"[venv] {bindir}")
     for cmd in prebuild:
         r = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, env=env)
         if r.returncode != 0:
-            return f"prebuild step failed: {cmd!r} (rc={r.returncode}):\n{r.stderr or r.stdout}"
+            return f"prebuild step failed: {cmd!r} (rc={r.returncode}, venv={bindir}):\n{r.stderr or r.stdout}"
         say(f"[ok] {cmd}")
 
     # 2. show status and gate on it (may run prebuild twice across a non-TTY review re-run -- clean/export are idempotent)
