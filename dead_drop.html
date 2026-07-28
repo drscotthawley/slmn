@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.10.18">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+<meta name="description" content="Async file-based IPC: one side drop()s a file, another side – possibly a different process, possibly a different machine reachable only via a synced/shared directory (Dropbox, rsync, an NFS mount, …) – pickup()s it later, no direct connection between the two required. Named after the spy tradecraft term. This is the “agent-loop file relay” deferred out of 02_remote.ipynb’s original scope, now built out on its own – and it subsumes an earlier hand-rolled prototype (cycle.sh/watch.sh, a bash-only prompt/response relay used to drive a Claude Code session from a Jupyter cell on a different machine) whose good ideas are generalized here: Maildir’s atomic-rename trick (drop()/pickup()), and blocking-wait-on-mtime-change (watch(), next_prompt()) – reimplemented in Python rather than shelled out to stat, because bash’s 1-second mtime resolution left a real race between “checked, nothing pending” and “started waiting for the next change” (found the hard way: a drop landing in that gap could be missed forever).">
+
+<title>dead_drop – slmn</title>
+<style>
+/* Default styles provided by pandoc.
+** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+*/
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: 1.5em;}
+div.column{flex: auto;}
+@media screen {
+div.columns{gap: min(4vw, 1.5em);}
+div.column{overflow-x: auto;}
+}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+html { -webkit-text-size-adjust: 100%; }
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="site_libs/quarto-nav/quarto-nav.js"></script>
+<script src="site_libs/quarto-nav/headroom.min.js"></script>
+<script src="site_libs/clipboard/clipboard.min.js"></script>
+<script src="site_libs/quarto-search/autocomplete.umd.js"></script>
+<script src="site_libs/quarto-search/fuse.min.js"></script>
+<script src="site_libs/quarto-search/quarto-search.js"></script>
+<meta name="quarto:offset" content="./">
+<script src="site_libs/quarto-html/quarto.js" type="module"></script>
+<script src="site_libs/quarto-html/tabsets/tabsets.js" type="module"></script>
+<script src="site_libs/quarto-html/popper.min.js"></script>
+<script src="site_libs/quarto-html/tippy.umd.min.js"></script>
+<script src="site_libs/quarto-html/anchor.min.js"></script>
+<link href="site_libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="site_libs/quarto-html/quarto-syntax-highlighting-64a204ab8560d761af7679ceaba22944.css" rel="stylesheet" class="quarto-color-scheme" id="quarto-text-highlighting-styles">
+<link href="site_libs/quarto-html/quarto-syntax-highlighting-dark-53dc85963c67a221f6f2030af840abbe.css" rel="stylesheet" class="quarto-color-scheme quarto-color-alternate" id="quarto-text-highlighting-styles">
+<script src="site_libs/bootstrap/bootstrap.min.js"></script>
+<link href="site_libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="site_libs/bootstrap/bootstrap-63180c5dda01c187c33bc16bc49fe53e.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme" id="quarto-bootstrap" data-mode="light">
+<link href="site_libs/bootstrap/bootstrap-dark-ea6825fa1a1c61b6eda5718dd0f5fc1b.min.css" rel="stylesheet" append-hash="true" class="quarto-color-scheme quarto-color-alternate" id="quarto-bootstrap" data-mode="dark">
+<script id="quarto-search-options" type="application/json">{
+  "location": "navbar",
+  "copy-button": false,
+  "collapse-after": 3,
+  "panel-placement": "end",
+  "type": "overlay",
+  "limit": 50,
+  "keyboard-shortcut": [
+    "f",
+    "/",
+    "s"
+  ],
+  "show-item-context": false,
+  "language": {
+    "search-no-results-text": "No results",
+    "search-matching-documents-text": "matching documents",
+    "search-copy-link-title": "Copy link to search",
+    "search-hide-matches-text": "Hide additional matches",
+    "search-more-match-text": "more match in this document",
+    "search-more-matches-text": "more matches in this document",
+    "search-clear-button-title": "Clear",
+    "search-text-placeholder": "",
+    "search-detached-cancel-button-title": "Cancel",
+    "search-submit-button-title": "Submit",
+    "search-label": "Search"
+  }
+}</script>
+
+
+<link rel="stylesheet" href="styles.css">
+<meta property="og:title" content="dead_drop – slmn">
+<meta property="og:description" content="Async file-based IPC: one side drop()s a file, another side – possibly a different process, possibly a different machine reachable only via a synced/shared directory (Dropbox, rsync, an NFS mount, …) – pickup()s it later, no direct connection between the two required. Named after the spy tradecraft term. This is the “agent-loop file relay” deferred out of 02_remote.ipynb’s original scope, now built out on its own – and it subsumes an earlier hand-rolled prototype (cycle.sh/watch.sh, a bash-only prompt/response relay used to drive a Claude Code session from a Jupyter cell on a different machine) whose good ideas are generalized here: Maildir’s atomic-rename trick (drop()/pickup()), and blocking-wait-on-mtime-change (watch(), next_prompt()) – reimplemented in Python rather than shelled out to stat, because bash’s 1-second mtime resolution left a real race between “checked, nothing pending” and “started waiting for the next change” (found the hard way: a drop landing in that gap could be missed forever).">
+<meta property="og:site_name" content="slmn">
+<meta name="twitter:title" content="dead_drop – slmn">
+<meta name="twitter:description" content="Async file-based IPC: one side drop()s a file, another side – possibly a different process, possibly a different machine reachable only via a synced/shared directory (Dropbox, rsync, an NFS mount, …) – pickup()s it later, no direct connection between the two required. Named after the spy tradecraft term. This is the “agent-loop file relay” deferred out of 02_remote.ipynb’s original scope, now built out on its own – and it subsumes an earlier hand-rolled prototype (cycle.sh/watch.sh, a bash-only prompt/response relay used to drive a Claude Code session from a Jupyter cell on a different machine) whose good ideas are generalized here: Maildir’s atomic-rename trick (drop()/pickup()), and blocking-wait-on-mtime-change (watch(), next_prompt()) – reimplemented in Python rather than shelled out to stat, because bash’s 1-second mtime resolution left a real race between “checked, nothing pending” and “started waiting for the next change” (found the hard way: a drop landing in that gap could be missed forever).">
+<meta name="twitter:card" content="summary">
+</head>
+
+<body class="nav-sidebar floating nav-fixed quarto-dark"><script id="quarto-html-before-body" type="application/javascript">
+    const toggleBodyColorMode = (bsSheetEl) => {
+      const mode = bsSheetEl.getAttribute("data-mode");
+      const bodyEl = window.document.querySelector("body");
+      if (mode === "dark") {
+        bodyEl.classList.add("quarto-dark");
+        bodyEl.classList.remove("quarto-light");
+      } else {
+        bodyEl.classList.add("quarto-light");
+        bodyEl.classList.remove("quarto-dark");
+      }
+    }
+    const toggleBodyColorPrimary = () => {
+      const bsSheetEl = window.document.querySelector("link#quarto-bootstrap:not([rel=disabled-stylesheet])");
+      if (bsSheetEl) {
+        toggleBodyColorMode(bsSheetEl);
+      }
+    }
+    const setColorSchemeToggle = (alternate) => {
+      const toggles = window.document.querySelectorAll('.quarto-color-scheme-toggle');
+      for (let i=0; i < toggles.length; i++) {
+        const toggle = toggles[i];
+        if (toggle) {
+          if (alternate) {
+            toggle.classList.add("alternate");
+          } else {
+            toggle.classList.remove("alternate");
+          }
+        }
+      }
+    };
+    const toggleColorMode = (alternate) => {
+      // Switch the stylesheets
+      const primaryStylesheets = window.document.querySelectorAll('link.quarto-color-scheme:not(.quarto-color-alternate)');
+      const alternateStylesheets = window.document.querySelectorAll('link.quarto-color-scheme.quarto-color-alternate');
+      manageTransitions('#quarto-margin-sidebar .nav-link', false);
+      if (alternate) {
+        // note: dark is layered on light, we don't disable primary!
+        enableStylesheet(alternateStylesheets);
+        for (const sheetNode of alternateStylesheets) {
+          if (sheetNode.id === "quarto-bootstrap") {
+            toggleBodyColorMode(sheetNode);
+          }
+        }
+      } else {
+        disableStylesheet(alternateStylesheets);
+        enableStylesheet(primaryStylesheets)
+        toggleBodyColorPrimary();
+      }
+      manageTransitions('#quarto-margin-sidebar .nav-link', true);
+      // Switch the toggles
+      setColorSchemeToggle(alternate)
+      // Hack to workaround the fact that safari doesn't
+      // properly recolor the scrollbar when toggling (#1455)
+      if (navigator.userAgent.indexOf('Safari') > 0 && navigator.userAgent.indexOf('Chrome') == -1) {
+        manageTransitions("body", false);
+        window.scrollTo(0, 1);
+        setTimeout(() => {
+          window.scrollTo(0, 0);
+          manageTransitions("body", true);
+        }, 40);
+      }
+    }
+    const disableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        stylesheet.rel = 'disabled-stylesheet';
+      }
+    }
+    const enableStylesheet = (stylesheets) => {
+      for (let i=0; i < stylesheets.length; i++) {
+        const stylesheet = stylesheets[i];
+        if(stylesheet.rel !== 'stylesheet') { // for Chrome, which will still FOUC without this check
+          stylesheet.rel = 'stylesheet';
+        }
+      }
+    }
+    const manageTransitions = (selector, allowTransitions) => {
+      const els = window.document.querySelectorAll(selector);
+      for (let i=0; i < els.length; i++) {
+        const el = els[i];
+        if (allowTransitions) {
+          el.classList.remove('notransition');
+        } else {
+          el.classList.add('notransition');
+        }
+      }
+    }
+    const isFileUrl = () => {
+      return window.location.protocol === 'file:';
+    }
+    const hasAlternateSentinel = () => {
+      let styleSentinel = getColorSchemeSentinel();
+      if (styleSentinel !== null) {
+        return styleSentinel === "alternate";
+      } else {
+        return false;
+      }
+    }
+    const setStyleSentinel = (alternate) => {
+      const value = alternate ? "alternate" : "default";
+      if (!isFileUrl()) {
+        window.localStorage.setItem("quarto-color-scheme", value);
+      } else {
+        localAlternateSentinel = value;
+      }
+    }
+    const getColorSchemeSentinel = () => {
+      if (!isFileUrl()) {
+        const storageValue = window.localStorage.getItem("quarto-color-scheme");
+        return storageValue != null ? storageValue : localAlternateSentinel;
+      } else {
+        return localAlternateSentinel;
+      }
+    }
+    const toggleGiscusIfUsed = (isAlternate, darkModeDefault) => {
+      const baseTheme = document.querySelector('#giscus-base-theme')?.value ?? 'light';
+      const alternateTheme = document.querySelector('#giscus-alt-theme')?.value ?? 'dark';
+      let newTheme = '';
+      if(authorPrefersDark) {
+        newTheme = isAlternate ? baseTheme : alternateTheme;
+      } else {
+        newTheme = isAlternate ? alternateTheme : baseTheme;
+      }
+      const changeGiscusTheme = () => {
+        // From: https://github.com/giscus/giscus/issues/336
+        const sendMessage = (message) => {
+          const iframe = document.querySelector('iframe.giscus-frame');
+          if (!iframe) return;
+          iframe.contentWindow.postMessage({ giscus: message }, 'https://giscus.app');
+        }
+        sendMessage({
+          setConfig: {
+            theme: newTheme
+          }
+        });
+      }
+      const isGiscussLoaded = window.document.querySelector('iframe.giscus-frame') !== null;
+      if (isGiscussLoaded) {
+        changeGiscusTheme();
+      }
+    };
+    const authorPrefersDark = true;
+    const darkModeDefault = authorPrefersDark;
+    let localAlternateSentinel = darkModeDefault ? 'alternate' : 'default';
+    // Dark / light mode switch
+    window.quartoToggleColorScheme = () => {
+      // Read the current dark / light value
+      let toAlternate = !hasAlternateSentinel();
+      toggleColorMode(toAlternate);
+      setStyleSentinel(toAlternate);
+      toggleGiscusIfUsed(toAlternate, darkModeDefault);
+      window.dispatchEvent(new Event('resize'));
+    };
+    // Switch to dark mode if need be
+    if (hasAlternateSentinel()) {
+      toggleColorMode(true);
+    } else {
+      toggleColorMode(false);
+    }
+  </script>
+
+<div id="quarto-search-results"></div>
+  <header id="quarto-header" class="headroom fixed-top">
+    <nav class="navbar navbar-expand-lg " data-bs-theme="dark">
+      <div class="navbar-container container-fluid">
+      <div class="navbar-brand-container mx-auto">
+    <a class="navbar-brand" href="./index.html">
+    <span class="navbar-title">slmn</span>
+    </a>
+  </div>
+        <div class="quarto-navbar-tools tools-end">
+  <a href="" class="quarto-color-scheme-toggle quarto-navigation-tool  px-1" onclick="window.quartoToggleColorScheme(); return false;" title="Toggle dark mode"><i class="bi"></i></a>
+</div>
+          <div id="quarto-search" class="" title="Search"></div>
+      </div> <!-- /container-fluid -->
+    </nav>
+  <nav class="quarto-secondary-nav">
+    <div class="container-fluid d-flex">
+      <button type="button" class="quarto-btn-toggle btn" data-bs-toggle="collapse" role="button" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">
+        <i class="bi bi-layout-text-sidebar-reverse"></i>
+      </button>
+        <nav class="quarto-page-breadcrumbs" aria-label="breadcrumb"><ol class="breadcrumb"><li class="breadcrumb-item"><a href="./dead_drop.html">dead_drop</a></li></ol></nav>
+        <a class="flex-grow-1" role="navigation" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item" aria-controls="quarto-sidebar" aria-expanded="false" aria-label="Toggle sidebar navigation" onclick="if (window.quartoToggleHeadroom) { window.quartoToggleHeadroom(); }">      
+        </a>
+    </div>
+  </nav>
+</header>
+<!-- content -->
+<div id="quarto-content" class="quarto-container page-columns page-rows-contents page-layout-article page-navbar">
+<!-- sidebar -->
+  <nav id="quarto-sidebar" class="sidebar collapse collapse-horizontal quarto-sidebar-collapse-item sidebar-navigation floating overflow-auto">
+    <div class="sidebar-menu-container"> 
+    <ul class="list-unstyled mt-1">
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./index.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">slmn</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./cli.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">cli</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./nbtools.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">nbtools</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./remote.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">remote</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./mcp.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">mcp</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./misc.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">misc</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./dead_drop.html" class="sidebar-item-text sidebar-link active">
+ <span class="menu-text">dead_drop</span></a>
+  </div>
+</li>
+        <li class="sidebar-item">
+  <div class="sidebar-item-container"> 
+  <a href="./publish.html" class="sidebar-item-text sidebar-link">
+ <span class="menu-text">publish</span></a>
+  </div>
+</li>
+    </ul>
+    </div>
+</nav>
+<div id="quarto-sidebar-glass" class="quarto-sidebar-collapse-item" data-bs-toggle="collapse" data-bs-target=".quarto-sidebar-collapse-item"></div>
+<!-- margin-sidebar -->
+    <div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+        <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">On this page</h2>
+   
+  <ul>
+  <li><a href="#machine_info.md" id="toc-machine_info.md" class="nav-link active" data-scroll-target="#machine_info.md">MACHINE_INFO.md</a></li>
+  <li><a href="#drop-pickup" id="toc-drop-pickup" class="nav-link" data-scroll-target="#drop-pickup">drop / pickup</a>
+  <ul class="collapse">
+  <li><a href="#drop" id="toc-drop" class="nav-link" data-scroll-target="#drop">drop</a></li>
+  <li><a href="#pickup" id="toc-pickup" class="nav-link" data-scroll-target="#pickup">pickup</a></li>
+  </ul></li>
+  <li><a href="#watch" id="toc-watch" class="nav-link" data-scroll-target="#watch">watch</a>
+  <ul class="collapse">
+  <li><a href="#watch-1" id="toc-watch-1" class="nav-link" data-scroll-target="#watch-1">watch</a></li>
+  </ul></li>
+  <li><a href="#list_sessions" id="toc-list_sessions" class="nav-link" data-scroll-target="#list_sessions">list_sessions</a>
+  <ul class="collapse">
+  <li><a href="#list_sessions-1" id="toc-list_sessions-1" class="nav-link" data-scroll-target="#list_sessions-1">list_sessions</a></li>
+  </ul></li>
+  <li><a href="#sessions-inbox-and-outbox" id="toc-sessions-inbox-and-outbox" class="nav-link" data-scroll-target="#sessions-inbox-and-outbox">Sessions: inbox and outbox</a>
+  <ul class="collapse">
+  <li><a href="#read_bundle" id="toc-read_bundle" class="nav-link" data-scroll-target="#read_bundle">read_bundle</a></li>
+  <li><a href="#drop_bundle" id="toc-drop_bundle" class="nav-link" data-scroll-target="#drop_bundle">drop_bundle</a></li>
+  <li><a href="#drop_prompt" id="toc-drop_prompt" class="nav-link" data-scroll-target="#drop_prompt">drop_prompt</a></li>
+  </ul></li>
+  <li><a href="#next_prompt" id="toc-next_prompt" class="nav-link" data-scroll-target="#next_prompt">next_prompt</a>
+  <ul class="collapse">
+  <li><a href="#next_prompt-1" id="toc-next_prompt-1" class="nav-link" data-scroll-target="#next_prompt-1">next_prompt</a></li>
+  </ul></li>
+  <li><a href="#stream" id="toc-stream" class="nav-link" data-scroll-target="#stream">stream</a>
+  <ul class="collapse">
+  <li><a href="#follow_reply" id="toc-follow_reply" class="nav-link" data-scroll-target="#follow_reply">follow_reply</a></li>
+  <li><a href="#follow_file" id="toc-follow_file" class="nav-link" data-scroll-target="#follow_file">follow_file</a></li>
+  <li><a href="#read_prompt" id="toc-read_prompt" class="nav-link" data-scroll-target="#read_prompt">read_prompt</a></li>
+  <li><a href="#pending_prompts" id="toc-pending_prompts" class="nav-link" data-scroll-target="#pending_prompts">pending_prompts</a></li>
+  <li><a href="#await_prompt" id="toc-await_prompt" class="nav-link" data-scroll-target="#await_prompt">await_prompt</a></li>
+  <li><a href="#reply_stream" id="toc-reply_stream" class="nav-link" data-scroll-target="#reply_stream">reply_stream</a></li>
+  <li><a href="#stream-1" id="toc-stream-1" class="nav-link" data-scroll-target="#stream-1">stream</a></li>
+  <li><a href="#streamwriter" id="toc-streamwriter" class="nav-link" data-scroll-target="#streamwriter">StreamWriter</a></li>
+  </ul></li>
+  <li><a href="#cli-responder-tools" id="toc-cli-responder-tools" class="nav-link" data-scroll-target="#cli-responder-tools">CLI responder tools</a>
+  <ul class="collapse">
+  <li><a href="#respond_prompt" id="toc-respond_prompt" class="nav-link" data-scroll-target="#respond_prompt">respond_prompt</a></li>
+  <li><a href="#watch_prompts" id="toc-watch_prompts" class="nav-link" data-scroll-target="#watch_prompts">watch_prompts</a></li>
+  </ul></li>
+  <li><a href="#smoke-test" id="toc-smoke-test" class="nav-link" data-scroll-target="#smoke-test">Smoke test</a></li>
+  </ul>
+<div class="toc-actions"><ul><li><a href="https://github.com/drscotthawley/slmn/issues/new" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div><div class="quarto-alternate-formats"><h2>Other Formats</h2><ul><li><a href="dead_drop.html.md"><i class="bi bi-file-code"></i>Markdown</a></li></ul></div></nav>
+    </div>
+<!-- main -->
+<main class="content" id="quarto-document-content">
+
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">dead_drop</h1>
+</div>
+
+<div>
+  <div class="description">
+    Async file-based IPC: one side <code>drop()</code>s a file, another side – possibly a different process, possibly a different machine reachable only via a synced/shared directory (Dropbox, rsync, an NFS mount, …) – <code>pickup()</code>s it later, no direct connection between the two required. Named after the spy tradecraft term. This is the “agent-loop file relay” deferred out of <code>02_remote.ipynb</code>’s original scope, now built out on its own – and it subsumes an earlier hand-rolled prototype (<code>cycle.sh</code>/<code>watch.sh</code>, a bash-only prompt/response relay used to drive a Claude Code session from a Jupyter cell on a different machine) whose good ideas are generalized here: Maildir’s atomic-rename trick (<code>drop()</code>/<code>pickup()</code>), and blocking-wait-on-mtime-change (<code>watch()</code>, <code>next_prompt()</code>) – reimplemented in Python rather than shelled out to <code>stat</code>, because bash’s 1-second mtime resolution left a real race between “checked, nothing pending” and “started waiting for the next change” (found the hard way: a drop landing in that gap could be missed forever).
+  </div>
+</div>
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<!-- WARNING: THIS FILE WAS AUTOGENERATED! DO NOT EDIT! -->
+<section id="machine_info.md" class="level2">
+<h2 class="anchored" data-anchor-id="machine_info.md">MACHINE_INFO.md</h2>
+<p>Session subdirectories live under one parent <code>dir</code> per machine, so that parent is a natural place to describe the machine itself – RAM, CPU count, GPU/VRAM if any – for a producer deciding which machine’s sessions to target. <a href="https://drscotthawley.github.io/slmn/dead_drop.html#watch"><code>watch()</code></a> writes this once per machine (skips it if the file’s already there, so it’s never overwritten with stale info by every session that starts up).</p>
+</section>
+<section id="drop-pickup" class="level2">
+<h2 class="anchored" data-anchor-id="drop-pickup">drop / pickup</h2>
+<p>One dead drop per message, in a shared directory. <a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop"><code>drop()</code></a> uses Maildir’s write-temp-then-atomic-rename trick, so a concurrent <a href="https://drscotthawley.github.io/slmn/dead_drop.html#pickup"><code>pickup()</code></a>/<a href="https://drscotthawley.github.io/slmn/dead_drop.html#watch"><code>watch()</code></a> never observes a half-written file.</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L86" target="_blank" style="float:right; font-size:smaller">source</a></p>
+<section id="drop" class="level3">
+<h3 class="anchored" data-anchor-id="drop">drop</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> drop(</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># directory to drop into (created if it doesn't exist)</span></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a>    content:<span class="bu">str</span>, <span class="co"># the drop's body</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a>    name:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># filename to use; default is a sortable `{timestamp}-{uuid8}` so pickups see drops in creation order</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">str</span>:</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Atomically write a dead drop into <code>dir</code>, for another process – possibly on another machine, via a synced/shared directory – to <a href="https://drscotthawley.github.io/slmn/dead_drop.html#pickup"><code>pickup()</code></a> or <a href="https://drscotthawley.github.io/slmn/dead_drop.html#watch"><code>watch()</code></a> later. Writes to a temp file in the same directory first, then atomically renames it into place (Maildir’s trick), so a concurrent pickup/watch never sees a half-written drop. Returns the dropped file’s final path.</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L101" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="pickup" class="level3">
+<h3 class="anchored" data-anchor-id="pickup">pickup</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> pickup(</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># directory to check for drops</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    delete:<span class="bu">bool</span><span class="op">=</span><span class="va">True</span>, <span class="co"># remove the file after reading it, so each drop is picked up exactly once</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">dict</span>: <span class="co"># {'path':..., 'name':..., 'content':...}, or None if nothing's pending</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Look for the oldest pending drop in <code>dir</code> (sorted by filename, so default drop() names – timestamp-prefixed – come out in creation order) and read it. Returns None if <code>dir</code> doesn’t exist or has no drops. Ignores hidden files – both its own in-progress temp files (<code>.tmp-*</code>) and stray dotfiles from other processes sharing the directory (e.g.&nbsp;an editor’s <code>.foo.swp</code> if something’s being edited in place there).</em></p>
+</section>
+</section>
+<section id="watch" class="level2">
+<h2 class="anchored" data-anchor-id="watch">watch</h2>
+<p>Blocking loop over <a href="https://drscotthawley.github.io/slmn/dead_drop.html#pickup"><code>pickup()</code></a>. Idles by polling <code>os.stat().st_mtime</code> (sub-second precision) instead of re-running <a href="https://drscotthawley.github.io/slmn/dead_drop.html#pickup"><code>pickup()</code></a> on a fixed timer – a directory’s mtime changes when a file is added inside it, so this reacts to a new drop without necessarily waiting out a full <code>poll_interval</code>. The mtime baseline is captured <em>before</em> the emptiness check, not after, so a drop landing in between is still caught on the very next check rather than silently missed.</p>
+<p><strong>Session-scoped subdirectories:</strong> so multiple agents can <a href="https://drscotthawley.github.io/slmn/dead_drop.html#watch"><code>watch()</code></a> the same parent <code>dir</code> without clobbering each other’s drops, <a href="https://drscotthawley.github.io/slmn/dead_drop.html#watch"><code>watch()</code></a> doesn’t read <code>dir</code> directly – it creates (or reuses, if already present) a subdirectory of <code>dir</code> named after the current session id, and pickups happen from there. The session id is auto-detected (<code>CLAUDE_CODE_SESSION_ID</code> if set, else a random id generated once and cached for the life of the process) or can be passed explicitly via <code>session_id=</code>. <a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop"><code>drop()</code></a>/<a href="https://drscotthawley.github.io/slmn/dead_drop.html#pickup"><code>pickup()</code></a> themselves are unchanged – callers on the producing side need to know which session subdirectory to drop into (not yet wired up; watch() is the first half of this change).</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L128" target="_blank" style="float:right; font-size:smaller">source</a></p>
+<section id="watch-1" class="level3">
+<h3 class="anchored" data-anchor-id="watch-1">watch</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb3"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> watch(</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent directory for drops; a session-scoped subdirectory is created (or reused) under it -- see module docs</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a>    callback:<span class="bu">callable</span>, <span class="co"># called as callback(drop) for each drop, where drop is the dict pickup() returns</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    poll_interval:<span class="bu">float</span><span class="op">=</span><span class="fl">1.0</span>, <span class="co"># seconds between mtime checks while dir is empty</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    delete:<span class="bu">bool</span><span class="op">=</span><span class="va">True</span>, <span class="co"># remove each drop after callback returns (passed through to pickup)</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    max_iters:<span class="bu">int</span><span class="op">=</span><span class="va">None</span>, <span class="co"># stop after this many drops-or-idle-checks (mainly for tests/scripted runs -- omit to run forever)</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    session_id:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># session id whose subdirectory to watch; default auto-detects (see _session_id)</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">int</span>:</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>*Blocking loop: repeatedly pickup() drops from a session-scoped subdirectory of <code>dir</code> and pass each to <code>callback</code>; when that subdirectory is empty, blocks on its mtime change (see _await_change) instead of busy-polling pickup() itself. The subdirectory is named after <code>session_id</code> (or the auto-detected current session id if omitted), created if it doesn’t exist yet or reused as-is if it does – so multiple agents watching the same parent <code>dir</code> don’t see each other’s drops. Also writes MACHINE_INFO.md into <code>dir</code> itself the first time any session watches there (see _write_machine_info) – a no-op on later calls once it exists. Runs forever unless <code>max_iters</code> is given – stop it with Ctrl-C otherwise. Like slmn’s other blocking primitives, this is CLI/import-only, never exposed over MCP, since it never returns promptly. Returns the number of drops processed.*</p>
+</section>
+</section>
+<section id="list_sessions" class="level2">
+<h2 class="anchored" data-anchor-id="list_sessions">list_sessions</h2>
+<p>The other half of session-scoped <a href="https://drscotthawley.github.io/slmn/dead_drop.html#watch"><code>watch()</code></a>: before a producer can <a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop"><code>drop()</code></a> a prompt into a specific agent’s subdirectory, it needs to know which session subdirectories currently exist. <a href="https://drscotthawley.github.io/slmn/dead_drop.html#list_sessions"><code>list_sessions()</code></a> just lists them.</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L154" target="_blank" style="float:right; font-size:smaller">source</a></p>
+<section id="list_sessions-1" class="level3">
+<h3 class="anchored" data-anchor-id="list_sessions-1">list_sessions</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> list_sessions(</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent dead-drop directory (the same `dir` passed to watch())</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>    require:<span class="bu">tuple</span><span class="op">=</span><span class="va">None</span>, <span class="co"># if given, only count a subdirectory as a session when it contains at least one of these subdirectories, e.g. ('inbox','outbox')</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">list</span>: <span class="co"># sorted list of session-id subdirectory names; [] if `dir` doesn't exist</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>List the session ids currently present as subdirectories of <code>dir</code> – i.e.&nbsp;sessions that have called watch(dir, …) here at least once – so a producer can pick one to drop() into. Sorted alphabetically. Ignores hidden/dotted entries and non-directories. <code>require</code> exists because ‘every subdirectory’ is too loose once a dead-drop root holds anything else: the single-file workflow keeps its own prompts/ and responses/ directories right there, and those would otherwise be offered as sessions you could address but never get an answer from. Passing require=(‘inbox’,‘outbox’) restricts the result to directories actually set up for the prompt/reply exchange.</em></p>
+</section>
+</section>
+<section id="sessions-inbox-and-outbox" class="level2">
+<h2 class="anchored" data-anchor-id="sessions-inbox-and-outbox">Sessions: inbox and outbox</h2>
+<p>One machine can be running several agent sessions at once, each with its own context – a different project, a different notebook, a different train of thought. So a producer with a prompt to send needs to say <em>which</em> one it’s for, and get that session’s answer back and no one else’s. Each session gets a subdirectory of <code>dir</code> holding exactly two directories:</p>
+<ul>
+<li><code>inbox/{prompt_id}/</code> – a prompt, dropped by the producer (<a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop_prompt"><code>drop_prompt</code></a>)</li>
+<li><code>outbox/{prompt_id}.md</code> – the reply, streamed back by the responder (<a href="https://drscotthawley.github.io/slmn/dead_drop.html#reply_stream"><code>reply_stream</code></a>)</li>
+</ul>
+<p><strong>Nothing is ever moved, renamed or deleted.</strong> Both halves stay where they were written, so the directories are their own permanent record of every exchange, and “what still needs answering” is a set difference computed on demand (<a href="https://drscotthawley.github.io/slmn/dead_drop.html#pending_prompts"><code>pending_prompts</code></a> = inbox minus outbox) rather than state maintained across directories – which can drift out of sync, or be left wrong by a crash at exactly the wrong instant.</p>
+<p>The two sides are shaped differently, on purpose. A <strong>prompt</strong> is a bundle: a directory built in a hidden temp dir and renamed into place in one atomic step (<a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop_bundle"><code>drop_bundle</code></a>, extending <a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop"><code>drop()</code></a>’s Maildir trick from a file to a directory), because the producer has the whole thing at once and it may carry attachments alongside the text, and a watcher must never see it half-written. A <strong>reply</strong> is a plain file appended to as it’s composed (<a href="https://drscotthawley.github.io/slmn/dead_drop.html#reply_stream"><code>reply_stream</code></a>), because it has to be <em>readable while it’s still being written</em> – someone is watching it arrive. An atomically-renamed bundle is invisible until it’s finished, which is exactly right for the prompt and useless for the reply.</p>
+<p>That leaves the reply with no atomic “it’s complete now” moment, so completion is marked in-band instead: <a href="https://drscotthawley.github.io/slmn/dead_drop.html#reply_stream"><code>reply_stream</code></a> appends <code>DONE_MARKER</code> when its block exits normally and deliberately not when it exits via an exception, so a reply cut short by a crash stays visibly unfinished rather than reading as a short complete answer. <a href="https://drscotthawley.github.io/slmn/dead_drop.html#follow_file"><code>follow_file</code></a>/<a href="https://drscotthawley.github.io/slmn/dead_drop.html#follow_reply"><code>follow_reply</code></a> yield chunks as they land and stop at that marker.</p>
+<p>Bundle directories are named by a <code>prompt_id</code> (see <a href="https://drscotthawley.github.io/slmn/dead_drop.html#_prompt_id"><code>_prompt_id</code></a>) – <code>{timestamp}-{slug}-{rand}</code>, e.g.&nbsp;<code>20260721T143205-hellow-a3f9c2</code> – so listings sort chronologically (the timestamp leads, same reasoning as <a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop"><code>drop()</code></a>’s default filename) while staying human-skimmable (<code>ls</code> shows a snippet of the prompt) and unique. The reply reuses its prompt’s id as its filename, which is what lets the two sides match up with no parsing.</p>
+<p>A responder just loops on <a href="https://drscotthawley.github.io/slmn/dead_drop.html#await_prompt"><code>await_prompt()</code></a> and answers with <a href="https://drscotthawley.github.io/slmn/dead_drop.html#reply_stream"><code>reply_stream()</code></a>. Waiting for prompts is itself what announces the session: <a href="https://drscotthawley.github.io/slmn/dead_drop.html#await_prompt"><code>await_prompt()</code></a> creates the two directories on the way in, and until they exist <code>list_sessions(require=('inbox','outbox'))</code> can’t see the session and a producer has nowhere to address a prompt. So starting the watch is all it takes to become reachable – print the session id it’s serving and the other side can pick it by name.</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L195" target="_blank" style="float:right; font-size:smaller">source</a></p>
+<section id="read_bundle" class="level3">
+<h3 class="anchored" data-anchor-id="read_bundle">read_bundle</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb5"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> read_bundle(</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a>    path:<span class="bu">str</span>, <span class="co"># a bundle directory, as written by drop_bundle</span></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">dict</span>: <span class="co"># {filename: content}, text decoded where possible, else raw bytes</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Read every file in a bundle directory into {filename: content}, decoding as text where possible and falling back to raw bytes for anything that isn’t (e.g.&nbsp;an image attachment).</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L176" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="drop_bundle" class="level3">
+<h3 class="anchored" data-anchor-id="drop_bundle">drop_bundle</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> drop_bundle(</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># directory to drop the bundle into (created if it doesn't exist)</span></span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    files:<span class="bu">dict</span>, <span class="co"># {filename: content}, content str or bytes</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    bundle_id:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># bundle directory name; auto-generated (see _prompt_id) from the first str-valued file's content if omitted</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">str</span>: <span class="co"># path to the bundle directory</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Atomically drop a multi-file bundle – e.g.&nbsp;a prompt’s text plus an image attachment – as a single directory under <code>dir</code>. Writes every file into a hidden temp directory first, then atomically renames the whole directory into place (extends drop()’s Maildir trick to a whole bundle), so a concurrent pickup/watch never sees a partially-written bundle. Returns the bundle’s final directory path.</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L209" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="drop_prompt" class="level3">
+<h3 class="anchored" data-anchor-id="drop_prompt">drop_prompt</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb7"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> drop_prompt(</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent dead-drop directory</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>    session_id:<span class="bu">str</span>, <span class="co"># which session's inbox to drop into</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>    files:<span class="bu">dict</span>, <span class="co"># {filename: content}, content str or bytes -- see drop_bundle</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">str</span>: <span class="co"># the generated prompt_id (the bundle's directory name)</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Drop a multi-file prompt bundle into a session’s inbox/ (see drop_bundle). Returns the prompt_id, which names the reply file to watch for in outbox/ (see follow_reply). The prompt is a bundle – a directory renamed into place in one step – because the producer has the whole thing at once and it may carry attachments; the reply deliberately isn’t (see reply_stream).</em></p>
+</section>
+</section>
+<section id="next_prompt" class="level2">
+<h2 class="anchored" data-anchor-id="next_prompt">next_prompt</h2>
+<p>The other reusable piece of the old prototype: a human types a prompt into a shared file (e.g.&nbsp;from a Jupyter cell on a different machine), possibly multi-line, and marks it submitted with a <code>---SEND---</code>-style line so a mid-typing autosave doesn’t false-trigger. <code>cycle.sh</code> implemented this with an awk block-extraction pass and a <code>.sentcount</code> sidecar file; <a href="https://drscotthawley.github.io/slmn/dead_drop.html#next_prompt"><code>next_prompt()</code></a> is the same idea generalized (any path, any marker regex, no hardcoded filenames) and reimplemented in Python, reusing <a href="https://drscotthawley.github.io/slmn/dead_drop.html#_await_change"><code>_await_change</code></a> for the blocking wait.</p>
+<p>The response side doesn’t need a new primitive – once a response is composed, <a href="https://drscotthawley.github.io/slmn/dead_drop.html#drop"><code>drop()</code></a> it to whatever file/directory the other end is watching.</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L231" target="_blank" style="float:right; font-size:smaller">source</a></p>
+<section id="next_prompt-1" class="level3">
+<h3 class="anchored" data-anchor-id="next_prompt-1">next_prompt</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> next_prompt(</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    path:<span class="bu">str</span>, <span class="co"># path to a growing, marker-delimited prompt log (e.g. a file a human edits in Jupyter/an editor and appends a SEND line to when done typing)</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    poll_interval:<span class="bu">float</span><span class="op">=</span><span class="fl">1.0</span>, <span class="co"># seconds between mtime checks</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    marker:<span class="bu">str</span><span class="op">=</span><span class="st">'^</span><span class="ch">\\</span><span class="st">s*-+</span><span class="ch">\\</span><span class="st">s*send</span><span class="ch">\\</span><span class="st">s*-+</span><span class="ch">\\</span><span class="st">s*$'</span>, <span class="co"># case-insensitive regex marking the end of a submitted block; a dash-padded SEND line by default</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">str</span>:</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>*Block until <code>path</code> gains a new complete marker-delimited block, then return that block’s text – the newest multi-line message the other side submitted. Waits for the file to actually change (see _await_change), then re-checks the marker count, so an unrelated resave or a still-typing autosave doesn’t false-trigger. Remembers how many markers it’s already consumed in a sidecar state file (<code>{path}.dd_state</code>), so repeated calls – e.g.&nbsp;one per turn of a conversation loop – never re-fire on old content.*</p>
+</section>
+</section>
+<section id="stream" class="level2">
+<h2 class="anchored" data-anchor-id="stream">stream</h2>
+<p>Write a dead drop incrementally instead of all at once – e.g.&nbsp;as an LLM streams tokens. One file, plain appends, flushed immediately so a <code>tail -f responses/{name}</code> sees it live. Same name a plain drop() would use.</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L337" target="_blank" style="float:right; font-size:smaller">source</a></p>
+<section id="follow_reply" class="level3">
+<h3 class="anchored" data-anchor-id="follow_reply">follow_reply</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb9"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> follow_reply(</span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent dead-drop directory</span></span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>    session_id:<span class="bu">str</span>, <span class="co"># the session that was prompted</span></span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>    prompt_id:<span class="bu">str</span>, <span class="co"># the id returned by drop_prompt</span></span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a>    poll_interval:<span class="bu">float</span><span class="op">=</span><span class="fl">1.0</span>, <span class="co"># seconds between checks</span></span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a>    name:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># reply filename within outbox/; defaults to '{prompt_id}.md' (matches reply_stream)</span></span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a>):</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Follow the streamed reply to <code>prompt_id</code> as the responder writes it (see follow_file) – the producer-side counterpart to reply_stream(), and the last step of an exchange: drop_prompt() to send, follow_reply() to receive. Returns when the reply is terminated by DONE_MARKER; a caller that doesn’t care about seeing it arrive can simply join everything yielded.</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L319" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="follow_file" class="level3">
+<h3 class="anchored" data-anchor-id="follow_file">follow_file</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb10"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> follow_file(</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>    path:<span class="bu">str</span>, <span class="co"># file to follow; it doesn't have to exist yet</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>    poll_interval:<span class="bu">float</span><span class="op">=</span><span class="fl">1.0</span>, <span class="co"># seconds between checks</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>):</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Follow a file being streamed into by a writer (see stream/reply_stream), yielding each newly-appended stretch of text as it lands – <code>tail -f</code> as a generator. Returns once the content ends with DONE_MARKER, which is stripped and never yielded, so joining everything yielded gives exactly the reply. Waits for <code>path</code> to appear rather than requiring it upfront, since the reader normally starts before the responder has written anything. Polls instead of using inotify deliberately: the whole point of dead_drop is that the directory can be a synced/networked one, where filesystem change events don’t cross the boundary but mtime and size still do.</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L312" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="read_prompt" class="level3">
+<h3 class="anchored" data-anchor-id="read_prompt">read_prompt</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> read_prompt(</span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent dead-drop directory</span></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>    session_id:<span class="bu">str</span>, <span class="co"># session whose inbox/ holds the prompt</span></span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a>    prompt_id:<span class="bu">str</span>, <span class="co"># the bundle id, e.g. from pending_prompts</span></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">dict</span>: <span class="co"># {filename: content} -- see read_bundle</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Read a prompt bundle out of a session’s inbox/ </em>without* claiming, moving or deleting it – the bundle counterpart to pickup(), minus the consuming. A prompt is answered by writing to outbox/, never by being taken; leaving it in place is what lets pending_prompts() work as a plain set difference, and keeps the whole exchange readable after the fact.*</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L302" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="pending_prompts" class="level3">
+<h3 class="anchored" data-anchor-id="pending_prompts">pending_prompts</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb12"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> pending_prompts(</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent dead-drop directory</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>    session_id:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># session to check; default auto-detects (see _session_id)</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">list</span>: <span class="co"># sorted prompt ids in inbox/ with no reply in outbox/</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>The prompt ids sitting in a session’s inbox/ that have no reply in its outbox/ yet – i.e.&nbsp;the work still to do. This is the two-directory protocol’s entire bookkeeping: nothing is ever moved, renamed or deleted, so ‘what’s outstanding’ is a set difference computed on demand instead of state that has to be maintained correctly across directories (and can therefore drift out of sync, or be left wrong by a crash at the wrong instant). Both halves of an exchange stay where they were written, which also makes the directories their own permanent record. Note this reports </em>unanswered<em>, not </em>unfinished<em>: a reply file counts the moment it’s created, even mid-stream, so use this to find work to pick up – to judge whether a reply actually completed, check for DONE_MARKER (see follow_file).</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L285" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="await_prompt" class="level3">
+<h3 class="anchored" data-anchor-id="await_prompt">await_prompt</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb13"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> await_prompt(</span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent dead-drop directory</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>    session_id:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># session to serve; default auto-detects (see _session_id)</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>    poll_interval:<span class="bu">float</span><span class="op">=</span><span class="fl">1.0</span>, <span class="co"># seconds between checks while the inbox is quiet</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">dict</span>: <span class="co"># {'id':..., 'files':...} -- the oldest unanswered prompt</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Block until this session has an unanswered prompt, then return the oldest one – the responder’s entry point, answering a producer’s drop_prompt(). Returns straight away if one is already waiting. Creates the session’s inbox/ and outbox/ first (and MACHINE_INFO.md alongside, if absent – same as watch()): waiting for prompts is exactly what announces a session, since until those two directories exist list_sessions(require=(‘inbox’,‘outbox’)) can’t see it and a producer has nowhere to address a prompt. The prompt itself stays in inbox/ (see read_prompt); what stops it counting as outstanding is a reply file appearing in outbox/, which reply_stream() creates the moment it starts writing – so an answer already in progress won’t be handed out twice. Idles on the inbox’s mtime rather than re-listing on a timer, with the baseline captured </em>before* the check, so a prompt landing in that gap is caught on the next pass instead of waiting out a full interval (the same race watch() closes).*</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L274" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="reply_stream" class="level3">
+<h3 class="anchored" data-anchor-id="reply_stream">reply_stream</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb14"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> reply_stream(</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># parent dead-drop directory</span></span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>    session_id:<span class="bu">str</span>, <span class="co"># the session being answered -- its outbox/ is written to</span></span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a>    prompt_id:<span class="bu">str</span>, <span class="co"># the id of the prompt being answered (as returned by drop_prompt / seen on an inbox bundle)</span></span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>    name:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># reply filename within outbox/; defaults to '{prompt_id}.md'</span></span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a>):</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>The responder’s half of a session exchange: stream a reply into <code>session_id</code>’s outbox/, answering <code>prompt_id</code>. The counterpart to drop_prompt() on the producer side. A reply is a plain appended-to file rather than an atomically-renamed bundle </em>because* it has to be readable while it’s still being written – a bundle only becomes visible once complete, which is right for a prompt (written all at once) and useless for a reply someone is watching arrive. DONE_MARKER is appended when the <code>with</code> block exits normally, and deliberately NOT when it exits via an exception: a reply file that stops growing without its terminator is therefore distinguishable from a finished one, which is the whole reason completion is marked in-band instead of inferred from the file merely existing.*</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L262" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="stream-1" class="level3">
+<h3 class="anchored" data-anchor-id="stream-1">stream</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb15"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb15-1"><a href="#cb15-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> stream(</span>
+<span id="cb15-2"><a href="#cb15-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span>, <span class="co"># directory to drop into (created if it doesn't exist)</span></span>
+<span id="cb15-3"><a href="#cb15-3" aria-hidden="true" tabindex="-1"></a>    name:<span class="bu">str</span>, <span class="co"># filename to write -- same as a plain drop(name=...)</span></span>
+<span id="cb15-4"><a href="#cb15-4" aria-hidden="true" tabindex="-1"></a>):</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Context manager for writing a dead drop incrementally. Inside the <code>with</code> block, call the yielded StreamWriter’s .write(chunk) for each piece of text as it’s produced; each call appends straight to <code>dir/name</code> and flushes, so a concurrent <code>tail -f</code> sees it live.</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L253" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="streamwriter" class="level3">
+<h3 class="anchored" data-anchor-id="streamwriter">StreamWriter</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb16"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> StreamWriter(</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    fh</span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a>):</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Handle yielded by stream() – call .write(chunk) for each piece of text as it’s produced.</em></p>
+</section>
+</section>
+<section id="cli-responder-tools" class="level2">
+<h2 class="anchored" data-anchor-id="cli-responder-tools">CLI responder tools</h2>
+<p>The legacy prompts/-and-responses/ exchange (the one boopiter’s <code>deaddrop/claude</code> model speaks) needs a responder on the other side – typically an agent like a Claude Code session. These two wrap that role as CLI-friendly one-shot commands: <a href="https://drscotthawley.github.io/slmn/dead_drop.html#watch_prompts"><code>watch_prompts</code></a> blocks until a prompt arrives and prints it (run it as a background command; its exit is the wake-up), <a href="https://drscotthawley.github.io/slmn/dead_drop.html#respond_prompt"><code>respond_prompt</code></a> writes the paired reply. Being in <code>TOOLS</code> means an agent needs only the one <code>slmn</code> shell permission for the whole loop, instead of ad hoc <code>python -c</code> snippets that trip permission prompts on every rearm.</p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L361" target="_blank" style="float:right; font-size:smaller">source</a></p>
+<section id="respond_prompt" class="level3">
+<h3 class="anchored" data-anchor-id="respond_prompt">respond_prompt</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb17"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb17-1"><a href="#cb17-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> respond_prompt(</span>
+<span id="cb17-2"><a href="#cb17-2" aria-hidden="true" tabindex="-1"></a>    name:<span class="bu">str</span>, <span class="co"># the prompt's filename, as reported by watch_prompts</span></span>
+<span id="cb17-3"><a href="#cb17-3" aria-hidden="true" tabindex="-1"></a>    text:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># reply body; omit to read it from stdin (spares shell-quoting a long reply)</span></span>
+<span id="cb17-4"><a href="#cb17-4" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># dead-drop root (default ~/dead_drop); writes into its responses/ subdirectory</span></span>
+<span id="cb17-5"><a href="#cb17-5" aria-hidden="true" tabindex="-1"></a>    model:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># if given, appended as a '---MODEL: &lt;model&gt;---' line before the DONE marker (the self-identification line boopiter's _DEADDROP_MODEL_RE parses into the reply details)</span></span>
+<span id="cb17-6"><a href="#cb17-6" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">str</span>:</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p><em>Write the reply to a legacy-route prompt: <code>dir</code>/responses/<code>name</code>, terminated with DONE_MARKER so a follow_file() reader knows it’s complete. Written via drop() – one atomic rename – so the reader sees the whole reply at once; that trades away live streaming (use stream() by hand if you want that), which for a one-shot CLI responder is the right default: no reader ever samples a half-written reply.</em></p>
+<hr>
+<p><a href="https://github.com/drscotthawley/slmn/blob/main/slmn/dead_drop.py#L348" target="_blank" style="float:right; font-size:smaller">source</a></p>
+</section>
+<section id="watch_prompts" class="level3">
+<h3 class="anchored" data-anchor-id="watch_prompts">watch_prompts</h3>
+<div class="code-copy-outer-scaffold"><div class="sourceCode" id="cb18"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> watch_prompts(</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>    <span class="bu">dir</span>:<span class="bu">str</span><span class="op">=</span><span class="va">None</span>, <span class="co"># dead-drop root (default ~/dead_drop); watches its prompts/ subdirectory</span></span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a>    poll_interval:<span class="bu">float</span><span class="op">=</span><span class="fl">0.25</span>, <span class="co"># seconds between pickup checks</span></span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a>)<span class="op">-&gt;</span><span class="bu">str</span>: <span class="co"># one JSON line: {"name":..., "content":...}</span></span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<p>*Block until a prompt file lands in <code>dir</code>/prompts, then consume it and return it as one JSON line – the legacy-route responder’s entry point, pairing with a producer that drops into prompts/ and follows responses/ (e.g.&nbsp;boopiter’s _deaddrop_stream_legacy). Blocking like watch(), so CLI/import-only, never MCP: run it as a background command and treat its exit as the wake-up signal. The prompt file is deleted on pickup – its name is all a responder needs to address the reply (see respond_prompt).*</p>
+</section>
+</section>
+<section id="smoke-test" class="level2">
+<h2 class="anchored" data-anchor-id="smoke-test">Smoke test</h2>
+<div id="cf041a7d" class="cell">
+<div class="code-copy-outer-scaffold"><div class="sourceCode cell-code" id="cb19"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> tempfile, threading, os</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>tmp_dir <span class="op">=</span> tempfile.mkdtemp()</span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a><span class="co"># drop / pickup</span></span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>p1 <span class="op">=</span> drop(tmp_dir, <span class="st">"first message"</span>)</span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a>p2 <span class="op">=</span> drop(tmp_dir, <span class="st">"second message"</span>)</span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(p1, p2)</span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-10"><a href="#cb19-10" aria-hidden="true" tabindex="-1"></a>d <span class="op">=</span> pickup(tmp_dir)</span>
+<span id="cb19-11"><a href="#cb19-11" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> d[<span class="st">'content'</span>] <span class="op">==</span> <span class="st">"first message"</span></span>
+<span id="cb19-12"><a href="#cb19-12" aria-hidden="true" tabindex="-1"></a>d <span class="op">=</span> pickup(tmp_dir)</span>
+<span id="cb19-13"><a href="#cb19-13" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> d[<span class="st">'content'</span>] <span class="op">==</span> <span class="st">"second message"</span></span>
+<span id="cb19-14"><a href="#cb19-14" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> pickup(tmp_dir) <span class="kw">is</span> <span class="va">None</span></span>
+<span id="cb19-15"><a href="#cb19-15" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"drop/pickup OK"</span>)</span>
+<span id="cb19-16"><a href="#cb19-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-17"><a href="#cb19-17" aria-hidden="true" tabindex="-1"></a><span class="co"># watch (drop from a background thread after a short delay -- this exact scenario</span></span>
+<span id="cb19-18"><a href="#cb19-18" aria-hidden="true" tabindex="-1"></a><span class="co"># used to hang forever under the old bash-mtime-poll implementation: see module docstring).</span></span>
+<span id="cb19-19"><a href="#cb19-19" aria-hidden="true" tabindex="-1"></a><span class="co"># watch() now reads from a session-scoped subdirectory of tmp_dir, so the delayed</span></span>
+<span id="cb19-20"><a href="#cb19-20" aria-hidden="true" tabindex="-1"></a><span class="co"># drop targets that same subdirectory explicitly rather than tmp_dir itself.</span></span>
+<span id="cb19-21"><a href="#cb19-21" aria-hidden="true" tabindex="-1"></a>received <span class="op">=</span> []</span>
+<span id="cb19-22"><a href="#cb19-22" aria-hidden="true" tabindex="-1"></a>watch_session_dir <span class="op">=</span> os.path.join(tmp_dir, <span class="st">"test-session"</span>)</span>
+<span id="cb19-23"><a href="#cb19-23" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _delayed_drop():</span>
+<span id="cb19-24"><a href="#cb19-24" aria-hidden="true" tabindex="-1"></a>    time.sleep(<span class="fl">0.3</span>)</span>
+<span id="cb19-25"><a href="#cb19-25" aria-hidden="true" tabindex="-1"></a>    drop(watch_session_dir, <span class="st">"watched message"</span>)</span>
+<span id="cb19-26"><a href="#cb19-26" aria-hidden="true" tabindex="-1"></a>threading.Thread(target<span class="op">=</span>_delayed_drop).start()</span>
+<span id="cb19-27"><a href="#cb19-27" aria-hidden="true" tabindex="-1"></a>n <span class="op">=</span> watch(tmp_dir, received.append, poll_interval<span class="op">=</span><span class="fl">0.1</span>, max_iters<span class="op">=</span><span class="dv">2</span>, session_id<span class="op">=</span><span class="st">"test-session"</span>)</span>
+<span id="cb19-28"><a href="#cb19-28" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(n, received)</span>
+<span id="cb19-29"><a href="#cb19-29" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> n <span class="op">==</span> <span class="dv">1</span> <span class="kw">and</span> received[<span class="dv">0</span>][<span class="st">'content'</span>] <span class="op">==</span> <span class="st">"watched message"</span></span>
+<span id="cb19-30"><a href="#cb19-30" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"watch OK"</span>)</span>
+<span id="cb19-31"><a href="#cb19-31" aria-hidden="true" tabindex="-1"></a><span class="co"># list_sessions</span></span>
+<span id="cb19-32"><a href="#cb19-32" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> list_sessions(tmp_dir) <span class="op">==</span> [<span class="st">"test-session"</span>]</span>
+<span id="cb19-33"><a href="#cb19-33" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> list_sessions(os.path.join(tmp_dir, <span class="st">"no-such-dir"</span>)) <span class="op">==</span> []</span>
+<span id="cb19-34"><a href="#cb19-34" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"list_sessions OK"</span>)</span>
+<span id="cb19-35"><a href="#cb19-35" aria-hidden="true" tabindex="-1"></a><span class="co"># MACHINE_INFO.md</span></span>
+<span id="cb19-36"><a href="#cb19-36" aria-hidden="true" tabindex="-1"></a>info_path <span class="op">=</span> os.path.join(tmp_dir, <span class="st">"MACHINE_INFO.md"</span>)</span>
+<span id="cb19-37"><a href="#cb19-37" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> os.path.exists(info_path)</span>
+<span id="cb19-38"><a href="#cb19-38" aria-hidden="true" tabindex="-1"></a>first_contents <span class="op">=</span> <span class="bu">open</span>(info_path).read()</span>
+<span id="cb19-39"><a href="#cb19-39" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="st">"GPU"</span> <span class="kw">in</span> first_contents <span class="kw">and</span> <span class="st">"VRAM"</span> <span class="kw">in</span> first_contents <span class="kw">and</span> <span class="st">"RAM"</span> <span class="kw">in</span> first_contents <span class="kw">and</span> <span class="st">"OS"</span> <span class="kw">in</span> first_contents</span>
+<span id="cb19-40"><a href="#cb19-40" aria-hidden="true" tabindex="-1"></a>watch(tmp_dir, <span class="kw">lambda</span> d: <span class="va">None</span>, poll_interval<span class="op">=</span><span class="fl">0.1</span>, max_iters<span class="op">=</span><span class="dv">0</span>, session_id<span class="op">=</span><span class="st">"another-session"</span>)</span>
+<span id="cb19-41"><a href="#cb19-41" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="bu">open</span>(info_path).read() <span class="op">==</span> first_contents  <span class="co"># second watch() call must not overwrite it</span></span>
+<span id="cb19-42"><a href="#cb19-42" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"MACHINE_INFO.md OK"</span>)</span>
+<span id="cb19-43"><a href="#cb19-43" aria-hidden="true" tabindex="-1"></a><span class="co"># sessions: a prompt bundle into inbox/, a streamed reply back out of outbox/, nothing moved</span></span>
+<span id="cb19-44"><a href="#cb19-44" aria-hidden="true" tabindex="-1"></a>bundle_root <span class="op">=</span> tempfile.mkdtemp()</span>
+<span id="cb19-45"><a href="#cb19-45" aria-hidden="true" tabindex="-1"></a>SESS <span class="op">=</span> <span class="st">"bundle-session"</span></span>
+<span id="cb19-46"><a href="#cb19-46" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-47"><a href="#cb19-47" aria-hidden="true" tabindex="-1"></a><span class="co"># a session is invisible until something waits on it -- await_prompt creates inbox/ + outbox/</span></span>
+<span id="cb19-48"><a href="#cb19-48" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> list_sessions(bundle_root, require<span class="op">=</span>(<span class="st">'inbox'</span>,<span class="st">'outbox'</span>)) <span class="op">==</span> []</span>
+<span id="cb19-49"><a href="#cb19-49" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-50"><a href="#cb19-50" aria-hidden="true" tabindex="-1"></a>pid <span class="op">=</span> drop_prompt(bundle_root, SESS, {<span class="st">"prompt.txt"</span>: <span class="st">"Hello, can you check the CI status?"</span>, <span class="st">"note.txt"</span>: <span class="st">"attachment"</span>})</span>
+<span id="cb19-51"><a href="#cb19-51" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> pid.split(<span class="st">"-"</span>)[<span class="dv">1</span>] <span class="op">==</span> <span class="st">"helloc"</span></span>
+<span id="cb19-52"><a href="#cb19-52" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> pending_prompts(bundle_root, SESS) <span class="op">==</span> [pid]</span>
+<span id="cb19-53"><a href="#cb19-53" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"drop_prompt/pending_prompts OK"</span>, pid)</span>
+<span id="cb19-54"><a href="#cb19-54" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-55"><a href="#cb19-55" aria-hidden="true" tabindex="-1"></a>got <span class="op">=</span> await_prompt(bundle_root, SESS, poll_interval<span class="op">=</span><span class="fl">0.1</span>)  <span class="co"># already waiting -- returns at once</span></span>
+<span id="cb19-56"><a href="#cb19-56" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> got[<span class="st">"id"</span>] <span class="op">==</span> pid</span>
+<span id="cb19-57"><a href="#cb19-57" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> got[<span class="st">"files"</span>] <span class="op">==</span> {<span class="st">"prompt.txt"</span>: <span class="st">"Hello, can you check the CI status?"</span>, <span class="st">"note.txt"</span>: <span class="st">"attachment"</span>}</span>
+<span id="cb19-58"><a href="#cb19-58" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> list_sessions(bundle_root, require<span class="op">=</span>(<span class="st">'inbox'</span>,<span class="st">'outbox'</span>)) <span class="op">==</span> [SESS]  <span class="co"># now discoverable</span></span>
+<span id="cb19-59"><a href="#cb19-59" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"await_prompt OK"</span>)</span>
+<span id="cb19-60"><a href="#cb19-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-61"><a href="#cb19-61" aria-hidden="true" tabindex="-1"></a><span class="co"># the reply streams in on a background thread while the producer follows it live</span></span>
+<span id="cb19-62"><a href="#cb19-62" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _delayed_reply():</span>
+<span id="cb19-63"><a href="#cb19-63" aria-hidden="true" tabindex="-1"></a>    time.sleep(<span class="fl">0.2</span>)</span>
+<span id="cb19-64"><a href="#cb19-64" aria-hidden="true" tabindex="-1"></a>    <span class="cf">with</span> reply_stream(bundle_root, SESS, pid) <span class="im">as</span> w:</span>
+<span id="cb19-65"><a href="#cb19-65" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> part <span class="kw">in</span> (<span class="st">"CI is "</span>, <span class="st">"green"</span>):</span>
+<span id="cb19-66"><a href="#cb19-66" aria-hidden="true" tabindex="-1"></a>            w.write(part)</span>
+<span id="cb19-67"><a href="#cb19-67" aria-hidden="true" tabindex="-1"></a>            time.sleep(<span class="fl">0.2</span>)</span>
+<span id="cb19-68"><a href="#cb19-68" aria-hidden="true" tabindex="-1"></a>threading.Thread(target<span class="op">=</span>_delayed_reply).start()</span>
+<span id="cb19-69"><a href="#cb19-69" aria-hidden="true" tabindex="-1"></a>chunks <span class="op">=</span> <span class="bu">list</span>(follow_reply(bundle_root, SESS, pid, poll_interval<span class="op">=</span><span class="fl">0.05</span>))</span>
+<span id="cb19-70"><a href="#cb19-70" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="st">""</span>.join(chunks) <span class="op">==</span> <span class="st">"CI is green"</span>, chunks</span>
+<span id="cb19-71"><a href="#cb19-71" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="bu">len</span>(chunks) <span class="op">&gt;</span> <span class="dv">1</span>, <span class="ss">f"reply was not read incrementally: </span><span class="sc">{</span>chunks<span class="sc">}</span><span class="ss">"</span></span>
+<span id="cb19-72"><a href="#cb19-72" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"reply_stream/follow_reply OK"</span>, chunks)</span>
+<span id="cb19-73"><a href="#cb19-73" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-74"><a href="#cb19-74" aria-hidden="true" tabindex="-1"></a><span class="co"># answered, and the prompt survives -- nothing was moved, renamed or deleted</span></span>
+<span id="cb19-75"><a href="#cb19-75" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> pending_prompts(bundle_root, SESS) <span class="op">==</span> []</span>
+<span id="cb19-76"><a href="#cb19-76" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> (Path(bundle_root)<span class="op">/</span>SESS<span class="op">/</span><span class="st">'inbox'</span><span class="op">/</span>pid<span class="op">/</span><span class="st">'prompt.txt'</span>).exists()</span>
+<span id="cb19-77"><a href="#cb19-77" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> (Path(bundle_root)<span class="op">/</span>SESS<span class="op">/</span><span class="st">'outbox'</span><span class="op">/</span><span class="ss">f'</span><span class="sc">{</span>pid<span class="sc">}</span><span class="ss">.md'</span>).exists()</span>
+<span id="cb19-78"><a href="#cb19-78" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"nothing moved OK"</span>)</span>
+<span id="cb19-79"><a href="#cb19-79" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-80"><a href="#cb19-80" aria-hidden="true" tabindex="-1"></a><span class="co"># an unterminated reply must not read as a finished one</span></span>
+<span id="cb19-81"><a href="#cb19-81" aria-hidden="true" tabindex="-1"></a>half <span class="op">=</span> Path(bundle_root)<span class="op">/</span>SESS<span class="op">/</span><span class="st">'outbox'</span><span class="op">/</span><span class="st">'unfinished.md'</span></span>
+<span id="cb19-82"><a href="#cb19-82" aria-hidden="true" tabindex="-1"></a>half.write_text(<span class="st">"half a thought"</span>)</span>
+<span id="cb19-83"><a href="#cb19-83" aria-hidden="true" tabindex="-1"></a>g <span class="op">=</span> follow_file(<span class="bu">str</span>(half), poll_interval<span class="op">=</span><span class="fl">0.05</span>)</span>
+<span id="cb19-84"><a href="#cb19-84" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="bu">next</span>(g) <span class="op">==</span> <span class="st">"half a thought"</span></span>
+<span id="cb19-85"><a href="#cb19-85" aria-hidden="true" tabindex="-1"></a>ended <span class="op">=</span> []</span>
+<span id="cb19-86"><a href="#cb19-86" aria-hidden="true" tabindex="-1"></a>threading.Thread(target<span class="op">=</span><span class="kw">lambda</span>: ended.append(<span class="bu">next</span>(g, <span class="st">"RETURNED"</span>)), daemon<span class="op">=</span><span class="va">True</span>).start()</span>
+<span id="cb19-87"><a href="#cb19-87" aria-hidden="true" tabindex="-1"></a>time.sleep(<span class="fl">0.4</span>)</span>
+<span id="cb19-88"><a href="#cb19-88" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> <span class="kw">not</span> ended, <span class="st">"follow_file ended without DONE_MARKER -- a truncated reply would look complete"</span></span>
+<span id="cb19-89"><a href="#cb19-89" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"DONE_MARKER discipline OK"</span>)</span>
+<span id="cb19-90"><a href="#cb19-90" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-91"><a href="#cb19-91" aria-hidden="true" tabindex="-1"></a><span class="co"># next_prompt</span></span>
+<span id="cb19-92"><a href="#cb19-92" aria-hidden="true" tabindex="-1"></a>prompt_path <span class="op">=</span> os.path.join(tmp_dir, <span class="st">"prompts.txt"</span>)</span>
+<span id="cb19-93"><a href="#cb19-93" aria-hidden="true" tabindex="-1"></a><span class="bu">open</span>(prompt_path, <span class="st">"w"</span>).close()</span>
+<span id="cb19-94"><a href="#cb19-94" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-95"><a href="#cb19-95" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> _delayed_prompt():</span>
+<span id="cb19-96"><a href="#cb19-96" aria-hidden="true" tabindex="-1"></a>    time.sleep(<span class="fl">0.3</span>)</span>
+<span id="cb19-97"><a href="#cb19-97" aria-hidden="true" tabindex="-1"></a>    <span class="cf">with</span> <span class="bu">open</span>(prompt_path, <span class="st">"a"</span>) <span class="im">as</span> f:</span>
+<span id="cb19-98"><a href="#cb19-98" aria-hidden="true" tabindex="-1"></a>        f.write(<span class="st">"line one</span><span class="ch">\n</span><span class="st">line two</span><span class="ch">\n</span><span class="st">---SEND---</span><span class="ch">\n</span><span class="st">"</span>)</span>
+<span id="cb19-99"><a href="#cb19-99" aria-hidden="true" tabindex="-1"></a>threading.Thread(target<span class="op">=</span>_delayed_prompt).start()</span>
+<span id="cb19-100"><a href="#cb19-100" aria-hidden="true" tabindex="-1"></a>prompt <span class="op">=</span> next_prompt(prompt_path, poll_interval<span class="op">=</span><span class="fl">0.1</span>)</span>
+<span id="cb19-101"><a href="#cb19-101" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="bu">repr</span>(prompt))</span>
+<span id="cb19-102"><a href="#cb19-102" aria-hidden="true" tabindex="-1"></a><span class="cf">assert</span> prompt <span class="op">==</span> <span class="st">"line one</span><span class="ch">\n</span><span class="st">line two"</span></span>
+<span id="cb19-103"><a href="#cb19-103" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"next_prompt OK"</span>)</span></code></pre></div><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>/tmp/tmpdr5x2a9x/1784656078518161303-d2180ae7 /tmp/tmpdr5x2a9x/1784656078518296573-0721eab2
+drop/pickup OK
+1 [{'path': '/tmp/tmpdr5x2a9x/test-session/1784656078819363742-39db4f30', 'name': '1784656078819363742-39db4f30', 'content': 'watched message'}]
+watch OK
+list_sessions OK
+MACHINE_INFO.md OK
+drop_prompt OK 20260721T124758-helloc-747838
+watch_session OK
+reply_bundle/await_reply/pending_replies OK
+complete_reply/unprocessed_replies OK
+'line one\nline two'
+next_prompt OK</code></pre>
+</div>
+</div>
+
+
+</section>
+
+</main> <!-- /main -->
+<!-- Swap Quarto's built-in dark/light toggle icon (a small sideways switch) for boopiter's
+     own sun/moon SVGs (the exact paths from theme_swap() in boopiter/cells.py). We reuse
+     Quarto's toggle <a> so all the theme-switching + localStorage persistence keeps working;
+     we only replace what it looks like. Quarto adds `.alternate` to the toggle in dark mode,
+     which styles.css uses to show the moon (dark) vs sun (light) -- matching boopiter. -->
+<script>
+(function () {
+  var SUN = '<svg class="boop-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5.64,17l-.71.71a1,1,0,0,0,0,1.41,1,1,0,0,0,1.41,0l.71-.71A1,1,0,0,0,5.64,17ZM5,12a1,1,0,0,0-1-1H3a1,1,0,0,0,0,2H4A1,1,0,0,0,5,12Zm7-7a1,1,0,0,0,1-1V3a1,1,0,0,0-2,0V4A1,1,0,0,0,12,5ZM5.64,7.05a1,1,0,0,0,.7.29,1,1,0,0,0,.71-.29,1,1,0,0,0,0-1.41l-.71-.71A1,1,0,0,0,4.93,6.34Zm12,.29a1,1,0,0,0,.7-.29l.71-.71a1,1,0,1,0-1.41-1.41L17,5.64a1,1,0,0,0,0,1.41A1,1,0,0,0,17.66,7.34ZM21,11H20a1,1,0,0,0,0,2h1a1,1,0,0,0,0-2Zm-9,8a1,1,0,0,0-1,1v1a1,1,0,0,0,2,0V20A1,1,0,0,0,12,19ZM18.36,17A1,1,0,0,0,17,18.36l.71.71a1,1,0,0,0,1.41,0,1,1,0,0,0,0-1.41ZM12,6.5A5.5,5.5,0,1,0,17.5,12,5.51,5.51,0,0,0,12,6.5Zm0,9A3.5,3.5,0,1,1,15.5,12,3.5,3.5,0,0,1,12,15.5Z"/></svg>';
+  var MOON = '<svg class="boop-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M21.64,13a1,1,0,0,0-1.05-.14,8.05,8.05,0,0,1-3.37.73A8.15,8.15,0,0,1,9.08,5.49a8.59,8.59,0,0,1,.25-2A1,1,0,0,0,8,2.36,10.14,10.14,0,1,0,22,14.05,1,1,0,0,0,21.64,13Zm-9.5,6.69A8.14,8.14,0,0,1,7.08,5.22v.27A10.15,10.15,0,0,0,17.22,15.63a9.79,9.79,0,0,0,2.1-.22A8.11,8.11,0,0,1,12.14,19.73Z"/></svg>';
+  function boopify() {
+    document.querySelectorAll('.quarto-color-scheme-toggle').forEach(function (t) {
+      if (t.dataset.boopified) return;
+      t.dataset.boopified = '1';
+      t.innerHTML = SUN + MOON;
+    });
+  }
+  boopify();                                             // toggle is server-rendered, usually already present
+  document.addEventListener('DOMContentLoaded', boopify); // ...but also catch a floated-in one
+})();
+</script>
+<script id="quarto-html-after-body" type="application/javascript">
+  window.document.addEventListener("DOMContentLoaded", function (event) {
+    // Ensure there is a toggle, if there isn't float one in the top right
+    if (window.document.querySelector('.quarto-color-scheme-toggle') === null) {
+      const a = window.document.createElement('a');
+      a.classList.add('top-right');
+      a.classList.add('quarto-color-scheme-toggle');
+      a.href = "";
+      a.onclick = function() { try { window.quartoToggleColorScheme(); } catch {} return false; };
+      const i = window.document.createElement("i");
+      i.classList.add('bi');
+      a.appendChild(i);
+      window.document.body.appendChild(a);
+    }
+    setColorSchemeToggle(hasAlternateSentinel())
+    const icon = "";
+    const anchorJS = new window.AnchorJS();
+    anchorJS.options = {
+      placement: 'right',
+      icon: icon
+    };
+    anchorJS.add('.anchored');
+    const isCodeAnnotation = (el) => {
+      for (const clz of el.classList) {
+        if (clz.startsWith('code-annotation-')) {                     
+          return true;
+        }
+      }
+      return false;
+    }
+    const onCopySuccess = function(e) {
+      // button target
+      const button = e.trigger;
+      // don't keep focus
+      button.blur();
+      // flash "checked"
+      button.classList.add('code-copy-button-checked');
+      var currentTitle = button.getAttribute("title");
+      button.setAttribute("title", "Copied!");
+      let tooltip;
+      if (window.bootstrap) {
+        button.setAttribute("data-bs-toggle", "tooltip");
+        button.setAttribute("data-bs-placement", "left");
+        button.setAttribute("data-bs-title", "Copied!");
+        tooltip = new bootstrap.Tooltip(button, 
+          { trigger: "manual", 
+            customClass: "code-copy-button-tooltip",
+            offset: [0, -8]});
+        tooltip.show();    
+      }
+      setTimeout(function() {
+        if (tooltip) {
+          tooltip.hide();
+          button.removeAttribute("data-bs-title");
+          button.removeAttribute("data-bs-toggle");
+          button.removeAttribute("data-bs-placement");
+        }
+        button.setAttribute("title", currentTitle);
+        button.classList.remove('code-copy-button-checked');
+      }, 1000);
+      // clear code selection
+      e.clearSelection();
+    }
+    const getTextToCopy = function(trigger) {
+      const outerScaffold = trigger.parentElement.cloneNode(true);
+      const codeEl = outerScaffold.querySelector('code');
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+    }
+    const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+      text: getTextToCopy
+    });
+    clipboard.on('success', onCopySuccess);
+    if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+      const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+        text: getTextToCopy,
+        container: window.document.getElementById('quarto-embedded-source-code-modal')
+      });
+      clipboardModal.on('success', onCopySuccess);
+    }
+      var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+      var mailtoRegex = new RegExp(/^mailto:/);
+        var filterRegex = new RegExp("https:\/\/drscotthawley\.github\.io\/slmn");
+      var isInternal = (href) => {
+          return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+      }
+      // Inspect non-navigation links and adorn them if external
+     var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+      for (var i=0; i<links.length; i++) {
+        const link = links[i];
+        if (!isInternal(link.href)) {
+          // undo the damage that might have been done by quarto-nav.js in the case of
+          // links that we want to consider external
+          if (link.dataset.originalHref !== undefined) {
+            link.href = link.dataset.originalHref;
+          }
+        }
+      }
+    function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+      const config = {
+        allowHTML: true,
+        maxWidth: 500,
+        delay: 100,
+        arrow: false,
+        appendTo: function(el) {
+            return el.parentElement;
+        },
+        interactive: true,
+        interactiveBorder: 10,
+        theme: 'quarto',
+        placement: 'bottom-start',
+      };
+      if (contentFn) {
+        config.content = contentFn;
+      }
+      if (onTriggerFn) {
+        config.onTrigger = onTriggerFn;
+      }
+      if (onUntriggerFn) {
+        config.onUntrigger = onUntriggerFn;
+      }
+      window.tippy(el, config); 
+    }
+    const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+    for (var i=0; i<noterefs.length; i++) {
+      const ref = noterefs[i];
+      tippyHover(ref, function() {
+        // use id or data attribute instead here
+        let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+        try { href = new URL(href).hash; } catch {}
+        const id = href.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note) {
+          return note.innerHTML;
+        } else {
+          return "";
+        }
+      });
+    }
+    const xrefs = window.document.querySelectorAll('a.quarto-xref');
+    const processXRef = (id, note) => {
+      // Strip column container classes
+      const stripColumnClz = (el) => {
+        el.classList.remove("page-full", "page-columns");
+        if (el.children) {
+          for (const child of el.children) {
+            stripColumnClz(child);
+          }
+        }
+      }
+      stripColumnClz(note)
+      if (id === null || id.startsWith('sec-')) {
+        // Special case sections, only their first couple elements
+        const container = document.createElement("div");
+        if (note.children && note.children.length > 2) {
+          container.appendChild(note.children[0].cloneNode(true));
+          for (let i = 1; i < note.children.length; i++) {
+            const child = note.children[i];
+            if (child.tagName === "P" && child.innerText === "") {
+              continue;
+            } else {
+              container.appendChild(child.cloneNode(true));
+              break;
+            }
+          }
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(container);
+          }
+          return container.innerHTML
+        } else {
+          if (window.Quarto?.typesetMath) {
+            window.Quarto.typesetMath(note);
+          }
+          return note.innerHTML;
+        }
+      } else {
+        // Remove any anchor links if they are present
+        const anchorLink = note.querySelector('a.anchorjs-link');
+        if (anchorLink) {
+          anchorLink.remove();
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        if (note.classList.contains("callout")) {
+          return note.outerHTML;
+        } else {
+          return note.innerHTML;
+        }
+      }
+    }
+    for (var i=0; i<xrefs.length; i++) {
+      const xref = xrefs[i];
+      tippyHover(xref, undefined, function(instance) {
+        instance.disable();
+        let url = xref.getAttribute('href');
+        let hash = undefined; 
+        if (url.startsWith('#')) {
+          hash = url;
+        } else {
+          try { hash = new URL(url).hash; } catch {}
+        }
+        if (hash) {
+          const id = hash.replace(/^#\/?/, "");
+          const note = window.document.getElementById(id);
+          if (note !== null) {
+            try {
+              const html = processXRef(id, note.cloneNode(true));
+              instance.setContent(html);
+            } finally {
+              instance.enable();
+              instance.show();
+            }
+          } else {
+            // See if we can fetch this
+            fetch(url.split('#')[0])
+            .then(res => res.text())
+            .then(html => {
+              const parser = new DOMParser();
+              const htmlDoc = parser.parseFromString(html, "text/html");
+              const note = htmlDoc.getElementById(id);
+              if (note !== null) {
+                const html = processXRef(id, note);
+                instance.setContent(html);
+              } 
+            }).finally(() => {
+              instance.enable();
+              instance.show();
+            });
+          }
+        } else {
+          // See if we can fetch a full url (with no hash to target)
+          // This is a special case and we should probably do some content thinning / targeting
+          fetch(url)
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.querySelector('main.content');
+            if (note !== null) {
+              // This should only happen for chapter cross references
+              // (since there is no id in the URL)
+              // remove the first header
+              if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+                note.children[0].remove();
+              }
+              const html = processXRef(null, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      }, function(instance) {
+      });
+    }
+        let selectedAnnoteEl;
+        const selectorForAnnotation = ( cell, annotation) => {
+          let cellAttr = 'data-code-cell="' + cell + '"';
+          let lineAttr = 'data-code-annotation="' +  annotation + '"';
+          const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+          return selector;
+        }
+        const selectCodeLines = (annoteEl) => {
+          const doc = window.document;
+          const targetCell = annoteEl.getAttribute("data-target-cell");
+          const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+          const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+          const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+          const lineIds = lines.map((line) => {
+            return targetCell + "-" + line;
+          })
+          let top = null;
+          let height = null;
+          let parent = null;
+          if (lineIds.length > 0) {
+              //compute the position of the single el (top and bottom and make a div)
+              const el = window.document.getElementById(lineIds[0]);
+              top = el.offsetTop;
+              height = el.offsetHeight;
+              parent = el.parentElement.parentElement;
+            if (lineIds.length > 1) {
+              const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+              const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+              height = bottom - top;
+            }
+            if (top !== null && height !== null && parent !== null) {
+              // cook up a div (if necessary) and position it 
+              let div = window.document.getElementById("code-annotation-line-highlight");
+              if (div === null) {
+                div = window.document.createElement("div");
+                div.setAttribute("id", "code-annotation-line-highlight");
+                div.style.position = 'absolute';
+                parent.appendChild(div);
+              }
+              div.style.top = top - 2 + "px";
+              div.style.height = height + 4 + "px";
+              div.style.left = 0;
+              let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+              if (gutterDiv === null) {
+                gutterDiv = window.document.createElement("div");
+                gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+                gutterDiv.style.position = 'absolute';
+                const codeCell = window.document.getElementById(targetCell);
+                const gutter = codeCell.querySelector('.code-annotation-gutter');
+                gutter.appendChild(gutterDiv);
+              }
+              gutterDiv.style.top = top - 2 + "px";
+              gutterDiv.style.height = height + 4 + "px";
+            }
+            selectedAnnoteEl = annoteEl;
+          }
+        };
+        const unselectCodeLines = () => {
+          const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+          elementsIds.forEach((elId) => {
+            const div = window.document.getElementById(elId);
+            if (div) {
+              div.remove();
+            }
+          });
+          selectedAnnoteEl = undefined;
+        };
+          // Handle positioning of the toggle
+      window.addEventListener(
+        "resize",
+        throttle(() => {
+          elRect = undefined;
+          if (selectedAnnoteEl) {
+            selectCodeLines(selectedAnnoteEl);
+          }
+        }, 10)
+      );
+      function throttle(fn, ms) {
+      let throttle = false;
+      let timer;
+        return (...args) => {
+          if(!throttle) { // first call gets through
+              fn.apply(this, args);
+              throttle = true;
+          } else { // all the others get throttled
+              if(timer) clearTimeout(timer); // cancel #2
+              timer = setTimeout(() => {
+                fn.apply(this, args);
+                timer = throttle = false;
+              }, ms);
+          }
+        };
+      }
+        // Attach click handler to the DT
+        const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+        for (const annoteDlNode of annoteDls) {
+          annoteDlNode.addEventListener('click', (event) => {
+            const clickedEl = event.target;
+            if (clickedEl !== selectedAnnoteEl) {
+              unselectCodeLines();
+              const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+              if (activeEl) {
+                activeEl.classList.remove('code-annotation-active');
+              }
+              selectCodeLines(clickedEl);
+              clickedEl.classList.add('code-annotation-active');
+            } else {
+              // Unselect the line
+              unselectCodeLines();
+              clickedEl.classList.remove('code-annotation-active');
+            }
+          });
+        }
+    const findCites = (el) => {
+      const parentEl = el.parentElement;
+      if (parentEl) {
+        const cites = parentEl.dataset.cites;
+        if (cites) {
+          return {
+            el,
+            cites: cites.split(' ')
+          };
+        } else {
+          return findCites(el.parentElement)
+        }
+      } else {
+        return undefined;
+      }
+    };
+    var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+    for (var i=0; i<bibliorefs.length; i++) {
+      const ref = bibliorefs[i];
+      const citeInfo = findCites(ref);
+      if (citeInfo) {
+        tippyHover(citeInfo.el, function() {
+          var popup = window.document.createElement('div');
+          citeInfo.cites.forEach(function(cite) {
+            var citeDiv = window.document.createElement('div');
+            citeDiv.classList.add('hanging-indent');
+            citeDiv.classList.add('csl-entry');
+            var biblioDiv = window.document.getElementById('ref-' + cite);
+            if (biblioDiv) {
+              citeDiv.innerHTML = biblioDiv.innerHTML;
+            }
+            popup.appendChild(citeDiv);
+          });
+          return popup.innerHTML;
+        });
+      }
+    }
+  });
+  </script>
+</div> <!-- /content -->
+
+
+
+
+<footer class="footer"><div class="nav-footer"><div class="nav-footer-center"><div class="toc-actions d-sm-block d-md-none"><ul><li><a href="https://github.com/drscotthawley/slmn/issues/new" class="toc-action"><i class="bi bi-github"></i>Report an issue</a></li></ul></div></div></div></footer></body></html>

@@ -1,0 +1,61 @@
+.cell {
+  margin-bottom: 1rem;
+}
+
+.cell > .sourceCode {
+  margin-bottom: 0;
+}
+
+.cell-output > pre {
+  margin-bottom: 0;
+}
+
+.cell-output > pre, .cell-output > .sourceCode > pre, .cell-output-stdout > pre {
+  margin-left: 0.8rem;
+  margin-top: 0;
+  background: none;
+  border-left: 2px solid lightsalmon;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.cell-output > .sourceCode {
+  border: none;
+}
+
+.cell-output > .sourceCode {
+  background: none;
+  margin-top: 0;
+}
+
+/* Plain code output (print()/stdout, stderr, text reprs) has no syntax-highlight
+   spans, so it inherits the default near-black text -- invisible on the dark
+   base-100 page. In DARK mode only, force a light grey; light mode keeps the
+   normal dark-on-white text. Quarto puts .quarto-dark on <body> for the dark
+   theme. Excludes .sourceCode so dracula-highlighted output keeps its tokens. */
+.quarto-dark .cell-output-stdout > pre, .quarto-dark .cell-output-stderr > pre,
+.quarto-dark .cell-output-display pre:not(.sourceCode) {
+  color: #c7ccd1;
+}
+
+div.description {
+  padding-left: 2px;
+  padding-top: 5px;
+  font-style: italic;
+  font-size: 135%;
+  opacity: 70%;
+}
+
+/* Sun/moon theme toggle: theme-toggle.html injects both SVGs into Quarto's own
+   color-scheme toggle; Quarto adds `.alternate` to that toggle in dark mode.
+   Show the moon in dark (alternate), the sun in light. */
+.quarto-color-scheme-toggle .bi { display: none; }
+.quarto-color-scheme-toggle svg {
+  width: 1.5rem; height: 1.5rem;   /* ~1.3x the original 1.15rem, to match Quarto's other navbar icons */
+  fill: currentColor;
+  vertical-align: -0.24em;
+  position: relative; top: 2px;    /* nudge down to line up with the search magnifier */
+}
+.quarto-color-scheme-toggle .boop-moon { display: none; }
+.quarto-color-scheme-toggle.alternate .boop-sun { display: none; }
+.quarto-color-scheme-toggle.alternate .boop-moon { display: inline-block; }
