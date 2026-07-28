@@ -7,7 +7,7 @@ Docs: https://drscotthawley.github.io/slmn/dead_drop.html.md"""
 # %% auto #0
 __all__ = ['DONE_MARKER', 'drop', 'pickup', 'watch', 'list_sessions', 'drop_bundle', 'read_bundle', 'drop_prompt', 'next_prompt',
            'StreamWriter', 'stream', 'reply_stream', 'await_prompt', 'pending_prompts', 'read_prompt', 'follow_file',
-           'follow_reply']
+           'follow_reply', 'watch_prompts', 'respond_prompt']
 
 # %% ../nbs/05_dead_drop.ipynb #2d949541
 import re, time, uuid, os
@@ -343,3 +343,32 @@ def follow_reply(dir:str, # parent dead-drop directory
     "Follow the streamed reply to `prompt_id` as the responder writes it (see follow_file) -- the producer-side counterpart to reply_stream(), and the last step of an exchange: drop_prompt() to send, follow_reply() to receive. Returns when the reply is terminated by DONE_MARKER; a caller that doesn't care about seeing it arrive can simply join everything yielded."
     outbox = Path(_resolve_safe(dir)) / session_id / 'outbox'
     yield from follow_file(str(outbox / (name or f'{prompt_id}.md')), poll_interval)
+
+# %% ../nbs/05_dead_drop.ipynb #96c5ff9d
+def watch_prompts(dir:str=None, # dead-drop root (default ~/dead_drop); watches its prompts/ subdirectory
+                  poll_interval:float=0.25 # seconds between pickup checks
+                  ) -> str: # one JSON line: {"name":..., "content":...}
+    "Block until a prompt file lands in `dir`/prompts, then consume it and return it as one JSON line -- the legacy-route responder's entry point, pairing with a producer that drops into prompts/ and follows responses/ (e.g. boopiter's _deaddrop_stream_legacy). Blocking like watch(), so CLI/import-only, never MCP: run it as a background command and treat its exit as the wake-up signal. The prompt file is deleted on pickup -- its name is all a responder needs to address the reply (see respond_prompt)."
+    import json
+    root = Path(_resolve_safe(dir)) if dir else Path.home()/'dead_drop'
+    p_dir = root/'prompts'
+    p_dir.mkdir(parents=True, exist_ok=True)
+    while True:
+        p = pickup(str(p_dir), delete=True)
+        if p is not None: return json.dumps({'name': p['name'], 'content': p['content']})
+        time.sleep(poll_interval)
+
+def respond_prompt(name:str, # the prompt's filename, as reported by watch_prompts
+                   text:str=None, # reply body; omit to read it from stdin (spares shell-quoting a long reply)
+                   dir:str=None, # dead-drop root (default ~/dead_drop); writes into its responses/ subdirectory
+                   model:str=None # if given, appended as a '---MODEL: <model>---' line before the DONE marker (the self-identification line boopiter's _DEADDROP_MODEL_RE parses into the reply details)
+                   ) -> str:
+    "Write the reply to a legacy-route prompt: `dir`/responses/`name`, terminated with DONE_MARKER so a follow_file() reader knows it's complete. Written via drop() -- one atomic rename -- so the reader sees the whole reply at once; that trades away live streaming (use stream() by hand if you want that), which for a one-shot CLI responder is the right default: no reader ever samples a half-written reply."
+    import sys
+    body = text if text is not None else sys.stdin.read()
+    root = Path(_resolve_safe(dir)) if dir else Path.home()/'dead_drop'
+    content = body.rstrip('\n')
+    if model: content += f"\n---MODEL: {model}---"
+    content += f"\n{DONE_MARKER}\n"
+    drop(str(root/'responses'), content, name=name)
+    return f"OK: response written for {name}"

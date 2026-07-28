@@ -14,6 +14,7 @@ from .nbtools import read_nb, grep_nb, edit_nb, patch_nb_cell, insert_cells, add
 from .misc import read_pdf, gpu_free, install_skills
 from .remote import remote_launch, remote_status, remote_smoke_test, remote_gpu_free, fetch_url, check_ci
 from .publish import publish
+from .dead_drop import watch_prompts, respond_prompt
 
 # %% ../nbs/00_cli.ipynb #7e517b66
 TOOLS = {
@@ -33,6 +34,8 @@ TOOLS = {
     'fetch_url': fetch_url,
     'check_ci': check_ci,
     'publish': publish,
+    'watch_prompts': watch_prompts,
+    'respond_prompt': respond_prompt,
 }
 
 # %% ../nbs/00_cli.ipynb #56c85754
